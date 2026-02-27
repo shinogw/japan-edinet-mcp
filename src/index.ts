@@ -15,6 +15,7 @@ import {
   calculateMetrics, 
   generateSummary 
 } from "./parsers/xbrl.js";
+import { parseXbrlFromZip, formatFinancialOutput } from "./parsers/xbrl-parser.js";
 
 // Load environment variables
 config();
@@ -463,24 +464,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         fs.reportType = DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription;
         fs.submitDate = latestDoc.submitDateTime;
 
-        // Note: In production, we would download and parse the actual XBRL file
-        // For now, return the document info with a note about XBRL parsing
+        // Download and parse XBRL
+        let financialData: object | null = null;
+        try {
+          if (latestDoc.xbrlFlag === "1") {
+            const xbrlZip = await client.getDocument(latestDoc.docID, "1");
+            const parsedFs = await parseXbrlFromZip(xbrlZip);
+            
+            // Update basic info
+            parsedFs.companyName = parsedFs.companyName || latestDoc.filerName;
+            parsedFs.secCode = parsedFs.secCode || latestDoc.secCode;
+            parsedFs.reportType = DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription;
+            parsedFs.submitDate = latestDoc.submitDateTime;
+            parsedFs.fiscalPeriod = latestDoc.periodStart && latestDoc.periodEnd 
+              ? `${latestDoc.periodStart} - ${latestDoc.periodEnd}` 
+              : "";
+            
+            financialData = formatFinancialOutput(parsedFs);
+          }
+        } catch (parseError) {
+          console.error("XBRL parse error:", parseError);
+        }
         
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
-                status: "partial",
-                message: "財務報告書を検出しました。XBRL完全解析は次期バージョンで実装予定です。",
+                status: financialData ? "success" : "partial",
+                message: financialData 
+                  ? "財務データを取得・解析しました。"
+                  : "財務報告書を検出しましたが、XBRLデータの解析に一部失敗しました。",
                 document: formatDocument(latestDoc),
-                financialStatements: fs,
+                financialAnalysis: financialData,
                 availableDocuments: reportDocs.slice(0, 5).map(formatDocument),
-                nextSteps: [
-                  "XBRL解析エンジンの完全実装",
-                  "BS/PL/CFの自動抽出",
-                  "財務指標の自動計算",
-                ],
               }, null, 2),
             },
           ],
