@@ -1,0 +1,44 @@
+{
+  "name": "japan-edinet-mcp",
+  "version": "0.1.0",
+  "description": "日本株決算データMCPサーバー - EDINET連携で有価証券報告書・決算短信をAIエージェントに提供",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "japan-edinet-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "edinet",
+    "japan",
+    "stock",
+    "financial",
+    "earnings",
+    "xbrl",
+    "disclosure"
+  ],
+  "author": "shinogw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shinogw/japan-edinet-mcp.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}
