@@ -19,6 +19,7 @@ import { parseXbrlFromZip, formatFinancialOutput } from "./parsers/xbrl-parser.j
 import { generateInvestmentRecommendation, InvestmentRecommendation } from "./analysis/investment-recommendation.js";
 import { scanDailyRevisions, EarningsRevision } from "./analysis/earnings-revision.js";
 import { scanDailyLargeShareholderReports, LargeShareholderReport } from "./analysis/large-shareholder.js";
+import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-events.js";
 
 // Load environment variables
 config();
@@ -244,6 +245,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             date: {
               type: "string",
               description: "検出する日付（YYYY-MM-DD形式）。指定しない場合は今日",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "detect_material_events",
+        description: "【重要事実検出】指定日の臨時報告書から重要事実（M&A、代表者異動、訴訟、災害、自社株買い、増資、上場廃止等）を検出します。イベント種別、影響度（CRITICAL/HIGH/MEDIUM/LOW）、想定株価影響を自動分析。AIエージェントが全臨時報告書を読むと数百万トークン消費しますが、このMCPなら重要イベントのみ抽出します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            date: {
+              type: "string",
+              description: "検出する日付（YYYY-MM-DD形式）。指定しない場合は今日",
+            },
+            minImpact: {
+              type: "string",
+              description: "最小影響度フィルタ（CRITICAL/HIGH/MEDIUM/LOW）",
             },
           },
           required: [],
@@ -734,6 +753,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 type: "text",
                 text: JSON.stringify({
                   error: "Failed to detect large shareholders",
+                  message: error instanceof Error ? error.message : String(error),
+                  date: targetDate,
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      case "detect_material_events": {
+        const { date, minImpact } = args as { date?: string; minImpact?: string };
+        
+        const targetDate = date || new Date().toISOString().split("T")[0];
+        
+        try {
+          const response = await client.getDocumentList({ date: targetDate, type: "2" });
+          let events = scanDailyMaterialEvents(response.results);
+          
+          // 影響度フィルタ
+          if (minImpact) {
+            const levelOrder: Record<string, number> = { "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3 };
+            const minLevel = levelOrder[minImpact.toUpperCase()] ?? 3;
+            events = events.filter((e) => levelOrder[e.impact.level] <= minLevel);
+          }
+          
+          // 統計
+          const criticalCount = events.filter((e) => e.impact.level === "CRITICAL").length;
+          const highCount = events.filter((e) => e.impact.level === "HIGH").length;
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "success",
+                  tokenSaved: "~2,000,000 tokens (vs reading all extraordinary reports)",
+                  date: targetDate,
+                  totalDocuments: response.metadata.resultset.count,
+                  eventsFound: events.length,
+                  criticalEvents: criticalCount,
+                  highImpactEvents: highCount,
+                  events: events.map((e) => ({
+                    company: e.companyName,
+                    secCode: e.secCode,
+                    eventType: e.eventType,
+                    headline: e.summary.headline,
+                    impactLevel: e.impact.level,
+                    impactDirection: e.impact.direction,
+                    estimatedPriceImpact: e.impact.estimatedPriceImpact,
+                    timeframe: e.summary.timeframe,
+                    tradingImplication: e.summary.tradingImplication,
+                    docId: e.docId,
+                  })),
+                  summary: events.length > 0
+                    ? `${targetDate}に${events.length}件の重要事実を検出（CRITICAL: ${criticalCount}件, HIGH: ${highCount}件）`
+                    : `${targetDate}に重要事実はありませんでした`,
+                }, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Failed to detect material events",
                   message: error instanceof Error ? error.message : String(error),
                   date: targetDate,
                 }, null, 2),
