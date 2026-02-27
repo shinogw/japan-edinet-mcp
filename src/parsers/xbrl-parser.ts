@@ -22,30 +22,128 @@ const parser = new XMLParser({
  * XBRLタグから値を抽出するためのマッピング
  */
 const VALUE_EXTRACTORS: Record<string, { path: string; field: keyof any }[]> = {
-  // 損益計算書
+  // ========== 損益計算書 ==========
+  // 売上高（複数のタグパターンに対応）
   "jppfs_cor:NetSales": [{ path: "incomeStatement", field: "revenue" }],
   "jppfs_cor:OperatingRevenue1": [{ path: "incomeStatement", field: "revenue" }],
+  "jppfs_cor:OperatingRevenue2": [{ path: "incomeStatement", field: "revenue" }],
+  "jppfs_cor:RevenueIFRS": [{ path: "incomeStatement", field: "revenue" }],
+  "jppfs_cor:Revenue": [{ path: "incomeStatement", field: "revenue" }],
+  "jppfs_cor:NetSalesOfCompletedConstructionContracts": [{ path: "incomeStatement", field: "revenue" }],
+  
+  // 売上総利益
   "jppfs_cor:GrossProfit": [{ path: "incomeStatement", field: "grossProfit" }],
+  "jppfs_cor:GrossProfitOnSales": [{ path: "incomeStatement", field: "grossProfit" }],
+  
+  // 営業利益
   "jppfs_cor:OperatingIncome": [{ path: "incomeStatement", field: "operatingIncome" }],
+  "jppfs_cor:OperatingProfit": [{ path: "incomeStatement", field: "operatingIncome" }],
+  "jppfs_cor:OperatingIncomeIFRS": [{ path: "incomeStatement", field: "operatingIncome" }],
+  
+  // 経常利益
   "jppfs_cor:OrdinaryIncome": [{ path: "incomeStatement", field: "ordinaryIncome" }],
+  "jppfs_cor:OrdinaryProfit": [{ path: "incomeStatement", field: "ordinaryIncome" }],
+  
+  // 当期純利益
   "jppfs_cor:ProfitLoss": [{ path: "incomeStatement", field: "netIncome" }],
   "jppfs_cor:ProfitLossAttributableToOwnersOfParent": [{ path: "incomeStatement", field: "netIncome" }],
+  "jppfs_cor:NetIncome": [{ path: "incomeStatement", field: "netIncome" }],
+  "jppfs_cor:NetIncomeIFRS": [{ path: "incomeStatement", field: "netIncome" }],
+  "jppfs_cor:ProfitAttributableToOwnersOfParent": [{ path: "incomeStatement", field: "netIncome" }],
   
-  // 貸借対照表
+  // EPS（1株当たり当期純利益）
+  "jppfs_cor:BasicEarningsLossPerShare": [{ path: "incomeStatement", field: "eps" }],
+  "jppfs_cor:BasicEarningsPerShare": [{ path: "incomeStatement", field: "eps" }],
+  "jppfs_cor:BasicEarningsLossPerShareIFRS": [{ path: "incomeStatement", field: "eps" }],
+  
+  // 売上原価
+  "jppfs_cor:CostOfSales": [{ path: "incomeStatement", field: "costOfSales" }],
+  "jppfs_cor:CostOfGoodsSold": [{ path: "incomeStatement", field: "costOfSales" }],
+  
+  // 販管費
+  "jppfs_cor:SellingGeneralAndAdministrativeExpenses": [{ path: "incomeStatement", field: "sellingExpenses" }],
+  "jppfs_cor:SGA": [{ path: "incomeStatement", field: "sellingExpenses" }],
+  
+  // ========== 貸借対照表 ==========
+  // 資産
   "jppfs_cor:Assets": [{ path: "balanceSheet", field: "totalAssets" }],
+  "jppfs_cor:TotalAssets": [{ path: "balanceSheet", field: "totalAssets" }],
+  "jppfs_cor:TotalAssetsIFRS": [{ path: "balanceSheet", field: "totalAssets" }],
+  
   "jppfs_cor:CurrentAssets": [{ path: "balanceSheet", field: "currentAssets" }],
   "jppfs_cor:CashAndDeposits": [{ path: "balanceSheet", field: "cashAndDeposits" }],
-  "jppfs_cor:NoncurrentAssets": [{ path: "balanceSheet", field: "nonCurrentAssets" }],
-  "jppfs_cor:Liabilities": [{ path: "balanceSheet", field: "totalLiabilities" }],
-  "jppfs_cor:CurrentLiabilities": [{ path: "balanceSheet", field: "currentLiabilities" }],
-  "jppfs_cor:NoncurrentLiabilities": [{ path: "balanceSheet", field: "nonCurrentLiabilities" }],
-  "jppfs_cor:NetAssets": [{ path: "balanceSheet", field: "netAssets" }],
-  "jppfs_cor:ShareholdersEquity": [{ path: "balanceSheet", field: "shareholdersEquity" }],
+  "jppfs_cor:CashAndCashEquivalents": [{ path: "balanceSheet", field: "cashAndDeposits" }],
+  "jppfs_cor:CashAndCashEquivalentsIFRS": [{ path: "balanceSheet", field: "cashAndDeposits" }],
   
-  // キャッシュフロー
+  "jppfs_cor:NotesAndAccountsReceivableTrade": [{ path: "balanceSheet", field: "accountsReceivable" }],
+  "jppfs_cor:TradeAndOtherReceivables": [{ path: "balanceSheet", field: "accountsReceivable" }],
+  
+  "jppfs_cor:Inventories": [{ path: "balanceSheet", field: "inventories" }],
+  "jppfs_cor:InventoriesIFRS": [{ path: "balanceSheet", field: "inventories" }],
+  
+  "jppfs_cor:NoncurrentAssets": [{ path: "balanceSheet", field: "nonCurrentAssets" }],
+  "jppfs_cor:NonCurrentAssets": [{ path: "balanceSheet", field: "nonCurrentAssets" }],
+  
+  "jppfs_cor:PropertyPlantAndEquipment": [{ path: "balanceSheet", field: "tangibleAssets" }],
+  "jppfs_cor:PropertyPlantAndEquipmentIFRS": [{ path: "balanceSheet", field: "tangibleAssets" }],
+  
+  "jppfs_cor:IntangibleAssets": [{ path: "balanceSheet", field: "intangibleAssets" }],
+  "jppfs_cor:IntangibleAssetsIFRS": [{ path: "balanceSheet", field: "intangibleAssets" }],
+  
+  "jppfs_cor:InvestmentsAndOtherAssets": [{ path: "balanceSheet", field: "investments" }],
+  
+  // 負債
+  "jppfs_cor:Liabilities": [{ path: "balanceSheet", field: "totalLiabilities" }],
+  "jppfs_cor:TotalLiabilities": [{ path: "balanceSheet", field: "totalLiabilities" }],
+  "jppfs_cor:TotalLiabilitiesIFRS": [{ path: "balanceSheet", field: "totalLiabilities" }],
+  
+  "jppfs_cor:CurrentLiabilities": [{ path: "balanceSheet", field: "currentLiabilities" }],
+  "jppfs_cor:NotesAndAccountsPayableTrade": [{ path: "balanceSheet", field: "accountsPayable" }],
+  "jppfs_cor:TradeAndOtherPayables": [{ path: "balanceSheet", field: "accountsPayable" }],
+  
+  "jppfs_cor:ShortTermLoansPayable": [{ path: "balanceSheet", field: "shortTermDebt" }],
+  "jppfs_cor:ShortTermBorrowings": [{ path: "balanceSheet", field: "shortTermDebt" }],
+  
+  "jppfs_cor:NoncurrentLiabilities": [{ path: "balanceSheet", field: "nonCurrentLiabilities" }],
+  "jppfs_cor:NonCurrentLiabilities": [{ path: "balanceSheet", field: "nonCurrentLiabilities" }],
+  
+  "jppfs_cor:LongTermLoansPayable": [{ path: "balanceSheet", field: "longTermDebt" }],
+  "jppfs_cor:LongTermBorrowings": [{ path: "balanceSheet", field: "longTermDebt" }],
+  "jppfs_cor:BondsPayable": [{ path: "balanceSheet", field: "longTermDebt" }],
+  
+  // 純資産
+  "jppfs_cor:NetAssets": [{ path: "balanceSheet", field: "netAssets" }],
+  "jppfs_cor:TotalEquity": [{ path: "balanceSheet", field: "netAssets" }],
+  "jppfs_cor:TotalEquityIFRS": [{ path: "balanceSheet", field: "netAssets" }],
+  
+  "jppfs_cor:ShareholdersEquity": [{ path: "balanceSheet", field: "shareholdersEquity" }],
+  "jppfs_cor:EquityAttributableToOwnersOfParent": [{ path: "balanceSheet", field: "shareholdersEquity" }],
+  
+  "jppfs_cor:RetainedEarnings": [{ path: "balanceSheet", field: "retainedEarnings" }],
+  "jppfs_cor:RetainedEarningsIFRS": [{ path: "balanceSheet", field: "retainedEarnings" }],
+  
+  // ========== キャッシュフロー計算書 ==========
+  // 営業キャッシュフロー
   "jppfs_cor:NetCashProvidedByUsedInOperatingActivities": [{ path: "cashFlow", field: "operatingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInOperatingActivities": [{ path: "cashFlow", field: "operatingCF" }],
+  "jppfs_cor:CashFlowsFromOperatingActivities": [{ path: "cashFlow", field: "operatingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInOperatingActivitiesIFRS": [{ path: "cashFlow", field: "operatingCF" }],
+  
+  // 投資キャッシュフロー
   "jppfs_cor:NetCashProvidedByUsedInInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:CashFlowsFromInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInInvestingActivitiesIFRS": [{ path: "cashFlow", field: "investingCF" }],
+  
+  // 財務キャッシュフロー
   "jppfs_cor:NetCashProvidedByUsedInFinancingActivities": [{ path: "cashFlow", field: "financingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInFinancingActivities": [{ path: "cashFlow", field: "financingCF" }],
+  "jppfs_cor:CashFlowsFromFinancingActivities": [{ path: "cashFlow", field: "financingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInFinancingActivitiesIFRS": [{ path: "cashFlow", field: "financingCF" }],
+  
+  // 期末現金残高
+  "jppfs_cor:CashAndCashEquivalentsAtEndOfPeriod": [{ path: "cashFlow", field: "cashEndOfPeriod" }],
+  "jppfs_cor:CashAndCashEquivalentsAtEnd": [{ path: "cashFlow", field: "cashEndOfPeriod" }],
 };
 
 /**
