@@ -17,6 +17,8 @@ import {
 } from "./parsers/xbrl.js";
 import { parseXbrlFromZip, formatFinancialOutput } from "./parsers/xbrl-parser.js";
 import { generateInvestmentRecommendation, InvestmentRecommendation } from "./analysis/investment-recommendation.js";
+import { scanDailyRevisions, EarningsRevision } from "./analysis/earnings-revision.js";
+import { scanDailyLargeShareholderReports, LargeShareholderReport } from "./analysis/large-shareholder.js";
 
 // Load environment variables
 config();
@@ -214,6 +216,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             companyName: {
               type: "string",
               description: "企業名（部分一致検索）",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "detect_earnings_revisions",
+        description: "【株価に直接影響】指定日の業績予想修正（上方修正・下方修正）を検出します。修正方向、発表タイミング（寄り前/場中/引け後）、トレーディング含意を自動分析。AIエージェントが全開示書類を読むと100万トークン以上消費しますが、このMCPなら重要な修正のみ抽出します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            date: {
+              type: "string",
+              description: "検出する日付（YYYY-MM-DD形式）。指定しない場合は今日",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "detect_large_shareholders",
+        description: "【アクティビスト検出】指定日の大量保有報告書（5%ルール）を検出します。有名アクティビスト（オアシス、エフィッシモ等）の動きを自動識別し、投資シグナルを生成。新規の大株主出現や保有比率変更をリアルタイムで把握できます。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            date: {
+              type: "string",
+              description: "検出する日付（YYYY-MM-DD形式）。指定しない場合は今日",
             },
           },
           required: [],
@@ -603,6 +633,115 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "detect_earnings_revisions": {
+        const { date } = args as { date?: string };
+        
+        const targetDate = date || new Date().toISOString().split("T")[0];
+        
+        try {
+          const response = await client.getDocumentList({ date: targetDate, type: "2" });
+          const revisions = scanDailyRevisions(response.results);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "success",
+                  tokenSaved: "~1,000,000 tokens (vs reading all disclosures)",
+                  date: targetDate,
+                  totalDocuments: response.metadata.resultset.count,
+                  revisionsFound: revisions.length,
+                  revisions: revisions.map((r) => ({
+                    company: r.companyName,
+                    secCode: r.secCode,
+                    type: r.revisionType,
+                    headline: r.summary.headline,
+                    impact: r.summary.impact,
+                    timing: r.meta.announcementTiming,
+                    tradingImplication: r.summary.tradingImplication,
+                    docId: r.docId,
+                  })),
+                  summary: revisions.length > 0
+                    ? `${targetDate}に${revisions.length}件の業績予想修正を検出`
+                    : `${targetDate}に業績予想修正はありませんでした`,
+                }, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Failed to detect revisions",
+                  message: error instanceof Error ? error.message : String(error),
+                  date: targetDate,
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      case "detect_large_shareholders": {
+        const { date } = args as { date?: string };
+        
+        const targetDate = date || new Date().toISOString().split("T")[0];
+        
+        try {
+          const response = await client.getDocumentList({ date: targetDate, type: "2" });
+          const reports = scanDailyLargeShareholderReports(response.results);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "success",
+                  tokenSaved: "~500,000 tokens (vs reading all 5% reports)",
+                  date: targetDate,
+                  totalDocuments: response.metadata.resultset.count,
+                  reportsFound: reports.length,
+                  reports: reports.map((r) => ({
+                    targetCompany: r.targetCompany,
+                    targetSecCode: r.targetSecCode,
+                    holder: r.holder.name,
+                    holderType: r.holder.type,
+                    reportType: r.reportType,
+                    signal: r.summary.signal,
+                    headline: r.summary.headline,
+                    keyPoints: r.summary.keyPoints,
+                    tradingImplication: r.summary.tradingImplication,
+                    docId: r.docId,
+                  })),
+                  activistAlerts: reports.filter((r) => r.summary.signal === "BULLISH").length,
+                  summary: reports.length > 0
+                    ? `${targetDate}に${reports.length}件の大量保有報告を検出（アクティビスト関連: ${reports.filter((r) => r.summary.signal === "BULLISH").length}件）`
+                    : `${targetDate}に大量保有報告はありませんでした`,
+                }, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Failed to detect large shareholders",
+                  message: error instanceof Error ? error.message : String(error),
+                  date: targetDate,
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
       }
 
       case "get_investment_recommendation": {
