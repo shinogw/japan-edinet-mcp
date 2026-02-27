@@ -6,7 +6,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { config } from "dotenv";
+// Load environment variables before anything else
+// Note: dotenv v17+ outputs to stdout which breaks MCP JSON protocol
+// Using programmatic config instead of CLI preload
+import "dotenv/config";
 
 import { getEdinetClient, Document } from "./api/edinet.js";
 import { 
@@ -20,9 +23,6 @@ import { generateInvestmentRecommendation, InvestmentRecommendation } from "./an
 import { scanDailyRevisions, EarningsRevision } from "./analysis/earnings-revision.js";
 import { scanDailyLargeShareholderReports, LargeShareholderReport } from "./analysis/large-shareholder.js";
 import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-events.js";
-
-// Load environment variables
-config();
 
 // Create server instance
 const server = new Server(
