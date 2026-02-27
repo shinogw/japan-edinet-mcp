@@ -12,7 +12,9 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postinstall": "node scripts/postinstall.js || true",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",
@@ -26,6 +28,12 @@
   ],
   "author": "shinogw",
   "license": "MIT",
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "smithery.yaml"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/shinogw/japan-edinet-mcp.git"
