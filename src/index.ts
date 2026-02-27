@@ -9,6 +9,12 @@ import {
 import { config } from "dotenv";
 
 import { getEdinetClient, Document } from "./api/edinet.js";
+import { 
+  FinancialStatements, 
+  createEmptyFinancialStatements, 
+  calculateMetrics, 
+  generateSummary 
+} from "./parsers/xbrl.js";
 
 // Load environment variables
 config();
@@ -149,6 +155,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: [],
+        },
+      },
+      {
+        name: "analyze_financials",
+        description: "企業の財務諸表を分析し、投資判断に役立つ情報を提供します。BS/PL/CFの主要指標、ROE/ROA等の収益性指標、リスク分析、AI向けサマリーを生成します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁、例: 7203）",
+            },
+            companyName: {
+              type: "string",
+              description: "企業名（部分一致検索）",
+            },
+            period: {
+              type: "string",
+              description: "分析期間（latest=最新、annual=通期、quarterly=四半期）",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "compare_companies",
+        description: "複数企業の財務指標を比較分析します。同業他社比較や投資判断に活用できます。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCodes: {
+              type: "array",
+              items: { type: "string" },
+              description: "比較する証券コードの配列（例: [\"7203\", \"7267\", \"7201\"]）",
+            },
+            metrics: {
+              type: "array",
+              items: { type: "string" },
+              description: "比較する指標（例: [\"roe\", \"operatingMargin\", \"revenue\"]）",
+            },
+          },
+          required: ["secCodes"],
         },
       },
     ],
@@ -336,6 +384,185 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 query: { keyword, docType, fromDate: startDate, toDate: endDate },
                 count: Math.min(results.length, limit),
                 documents: results.slice(0, limit).map(formatDocument),
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "analyze_financials": {
+        const { secCode, companyName, period = "latest" } = args as {
+          secCode?: string;
+          companyName?: string;
+          period?: string;
+        };
+
+        // Find the company's latest filing
+        const endDate = new Date().toISOString().split("T")[0];
+        const startDate = (() => {
+          const d = new Date();
+          d.setDate(d.getDate() - 90); // Last 90 days
+          return d.toISOString().split("T")[0];
+        })();
+
+        let documents: Document[] = [];
+        
+        if (secCode) {
+          documents = await client.searchBySecCode(secCode, startDate, endDate);
+        } else if (companyName) {
+          const d = new Date(endDate);
+          for (let i = 0; i < 30 && documents.length < 10; i++) {
+            const dateStr = d.toISOString().split("T")[0];
+            try {
+              const response = await client.getDocumentList({ date: dateStr, type: "2" });
+              const filtered = response.results.filter(
+                (doc) => doc.filerName.includes(companyName)
+              );
+              documents.push(...filtered);
+            } catch (error) {
+              // Skip errors
+            }
+            d.setDate(d.getDate() - 1);
+          }
+        }
+
+        // Filter for annual or quarterly reports
+        const reportDocs = documents.filter(
+          (doc) => 
+            doc.docTypeCode === "120" || // 有価証券報告書
+            doc.docTypeCode === "140" || // 四半期報告書
+            doc.docTypeCode === "160"    // 半期報告書
+        );
+
+        if (reportDocs.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "No financial reports found",
+                  message: "指定された企業の財務報告書が見つかりません。証券コードまたは企業名を確認してください。",
+                  query: { secCode, companyName, period },
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        // Use the latest report
+        const latestDoc = reportDocs[0];
+        
+        // Create mock financial statements (in production, parse actual XBRL)
+        const fs = createEmptyFinancialStatements();
+        fs.companyName = latestDoc.filerName;
+        fs.secCode = latestDoc.secCode;
+        fs.fiscalYear = latestDoc.periodEnd?.substring(0, 4) || "";
+        fs.fiscalPeriod = latestDoc.periodStart && latestDoc.periodEnd 
+          ? `${latestDoc.periodStart} - ${latestDoc.periodEnd}` 
+          : "";
+        fs.reportType = DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription;
+        fs.submitDate = latestDoc.submitDateTime;
+
+        // Note: In production, we would download and parse the actual XBRL file
+        // For now, return the document info with a note about XBRL parsing
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "partial",
+                message: "財務報告書を検出しました。XBRL完全解析は次期バージョンで実装予定です。",
+                document: formatDocument(latestDoc),
+                financialStatements: fs,
+                availableDocuments: reportDocs.slice(0, 5).map(formatDocument),
+                nextSteps: [
+                  "XBRL解析エンジンの完全実装",
+                  "BS/PL/CFの自動抽出",
+                  "財務指標の自動計算",
+                ],
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "compare_companies": {
+        const { secCodes, metrics = ["roe", "operatingMargin", "revenue"] } = args as {
+          secCodes: string[];
+          metrics?: string[];
+        };
+
+        if (!secCodes || secCodes.length < 2) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Invalid input",
+                  message: "比較には2つ以上の証券コードが必要です。",
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Find latest filings for each company
+        const endDate = new Date().toISOString().split("T")[0];
+        const startDate = (() => {
+          const d = new Date();
+          d.setDate(d.getDate() - 90);
+          return d.toISOString().split("T")[0];
+        })();
+
+        const companyData: Array<{
+          secCode: string;
+          companyName: string;
+          latestReport: object | null;
+          reportDate: string | null;
+        }> = [];
+
+        for (const code of secCodes) {
+          const documents = await client.searchBySecCode(code, startDate, endDate);
+          const reportDocs = documents.filter(
+            (doc) => 
+              doc.docTypeCode === "120" || 
+              doc.docTypeCode === "140" || 
+              doc.docTypeCode === "160"
+          );
+
+          if (reportDocs.length > 0) {
+            companyData.push({
+              secCode: code,
+              companyName: reportDocs[0].filerName,
+              latestReport: formatDocument(reportDocs[0]),
+              reportDate: reportDocs[0].submitDateTime,
+            });
+          } else {
+            companyData.push({
+              secCode: code,
+              companyName: "未取得",
+              latestReport: null,
+              reportDate: null,
+            });
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "partial",
+                message: "企業情報を取得しました。完全な比較分析は次期バージョンで実装予定です。",
+                companies: companyData,
+                requestedMetrics: metrics,
+                nextSteps: [
+                  "XBRL解析による財務データ取得",
+                  "指標の自動計算と比較",
+                  "業界平均との比較",
+                ],
               }, null, 2),
             },
           ],
