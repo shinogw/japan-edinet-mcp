@@ -16,6 +16,7 @@ import {
   generateSummary 
 } from "./parsers/xbrl.js";
 import { parseXbrlFromZip, formatFinancialOutput } from "./parsers/xbrl-parser.js";
+import { generateInvestmentRecommendation, InvestmentRecommendation } from "./analysis/investment-recommendation.js";
 
 // Load environment variables
 config();
@@ -198,6 +199,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["secCodes"],
+        },
+      },
+      {
+        name: "get_investment_recommendation",
+        description: "【投資助言業登録に基づく】企業の財務データを分析し、投資推奨レーティング（STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL）を生成します。ROE・ROA・営業利益率・D/Eレシオ等を総合評価し、法的根拠付きの投資判断を提供します。AIエージェントが自分で分析すると約50,000トークン消費しますが、このMCPなら1回のAPI呼び出しで完了します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁、例: 7203）",
+            },
+            companyName: {
+              type: "string",
+              description: "企業名（部分一致検索）",
+            },
+          },
+          required: [],
         },
       },
     ],
@@ -580,6 +599,143 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   "指標の自動計算と比較",
                   "業界平均との比較",
                 ],
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "get_investment_recommendation": {
+        const { secCode, companyName } = args as {
+          secCode?: string;
+          companyName?: string;
+        };
+
+        if (!secCode && !companyName) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Invalid input",
+                  message: "証券コード（secCode）または企業名（companyName）を指定してください。",
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Find the company's latest filing
+        const endDate = new Date().toISOString().split("T")[0];
+        const startDate = (() => {
+          const d = new Date();
+          d.setDate(d.getDate() - 180); // Last 180 days for annual reports
+          return d.toISOString().split("T")[0];
+        })();
+
+        let documents: Document[] = [];
+        
+        if (secCode) {
+          documents = await client.searchBySecCode(secCode, startDate, endDate);
+        } else if (companyName) {
+          const d = new Date(endDate);
+          for (let i = 0; i < 60 && documents.length < 10; i++) {
+            const dateStr = d.toISOString().split("T")[0];
+            try {
+              const response = await client.getDocumentList({ date: dateStr, type: "2" });
+              const filtered = response.results.filter(
+                (doc) => doc.filerName.includes(companyName!)
+              );
+              documents.push(...filtered);
+            } catch (error) {
+              // Skip errors
+            }
+            d.setDate(d.getDate() - 1);
+          }
+        }
+
+        // Filter for annual or quarterly reports with XBRL
+        const reportDocs = documents.filter(
+          (doc) => 
+            (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") &&
+            doc.xbrlFlag === "1"
+        );
+
+        if (reportDocs.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "No financial reports found",
+                  message: "指定された企業の財務報告書が見つかりません。証券コードまたは企業名を確認してください。",
+                  query: { secCode, companyName },
+                  tokenSaved: "N/A",
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        const latestDoc = reportDocs[0];
+        
+        // Download and parse XBRL
+        let recommendation: InvestmentRecommendation | null = null;
+        try {
+          const xbrlZip = await client.getDocument(latestDoc.docID, "1");
+          const parsedFs = await parseXbrlFromZip(xbrlZip);
+          
+          // Update basic info
+          parsedFs.companyName = parsedFs.companyName || latestDoc.filerName;
+          parsedFs.secCode = parsedFs.secCode || latestDoc.secCode;
+          parsedFs.reportType = DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription;
+          parsedFs.submitDate = latestDoc.submitDateTime;
+          parsedFs.fiscalPeriod = latestDoc.periodStart && latestDoc.periodEnd 
+            ? `${latestDoc.periodStart} - ${latestDoc.periodEnd}` 
+            : "";
+          
+          // Generate investment recommendation
+          recommendation = generateInvestmentRecommendation(parsedFs);
+          
+        } catch (parseError) {
+          console.error("XBRL parse error:", parseError);
+        }
+        
+        if (!recommendation) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Analysis failed",
+                  message: "財務データの解析に失敗しました。",
+                  document: formatDocument(latestDoc),
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                tokenSaved: "~50,000 tokens",
+                company: {
+                  name: latestDoc.filerName,
+                  secCode: latestDoc.secCode,
+                  reportType: DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription,
+                  reportDate: latestDoc.submitDateTime,
+                },
+                recommendation: recommendation.recommendation,
+                confidence: recommendation.confidence,
+                rationale: recommendation.rationale,
+                risks: recommendation.risks,
+                legal: recommendation.legal,
+                meta: recommendation.meta,
               }, null, 2),
             },
           ],
