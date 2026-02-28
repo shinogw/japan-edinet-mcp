@@ -131,8 +131,11 @@ const VALUE_EXTRACTORS: Record<string, { path: string; field: keyof any }[]> = {
   
   // 投資キャッシュフロー
   "jppfs_cor:NetCashProvidedByUsedInInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:NetCashProvidedByUsedInInvestmentActivities": [{ path: "cashFlow", field: "investingCF" }],
   "jppfs_cor:CashFlowsFromUsedInInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:CashFlowsFromUsedInInvestmentActivities": [{ path: "cashFlow", field: "investingCF" }],
   "jppfs_cor:CashFlowsFromInvestingActivities": [{ path: "cashFlow", field: "investingCF" }],
+  "jppfs_cor:CashFlowsFromInvestmentActivities": [{ path: "cashFlow", field: "investingCF" }],
   "jppfs_cor:CashFlowsFromUsedInInvestingActivitiesIFRS": [{ path: "cashFlow", field: "investingCF" }],
   
   // 財務キャッシュフロー
@@ -144,6 +147,46 @@ const VALUE_EXTRACTORS: Record<string, { path: string; field: keyof any }[]> = {
   // 期末現金残高
   "jppfs_cor:CashAndCashEquivalentsAtEndOfPeriod": [{ path: "cashFlow", field: "cashEndOfPeriod" }],
   "jppfs_cor:CashAndCashEquivalentsAtEnd": [{ path: "cashFlow", field: "cashEndOfPeriod" }],
+  
+  // ========== 配当情報 ==========
+  // 1株当たり配当金
+  "jppfs_cor:DividendPerShare": [{ path: "dividend", field: "annualDividendPerShare" }],
+  "jppfs_cor:DividendPaidPerShare": [{ path: "dividend", field: "annualDividendPerShare" }],
+  "jppfs_cor:AnnualDividendPerShare": [{ path: "dividend", field: "annualDividendPerShare" }],
+  "jppfs_cor:TotalDividendPaidPerShare": [{ path: "dividend", field: "annualDividendPerShare" }],
+  
+  // 中間配当
+  "jppfs_cor:InterimDividendPerShare": [{ path: "dividend", field: "interimDividendPerShare" }],
+  "jppfs_cor:InterimDividendPaidPerShare": [{ path: "dividend", field: "interimDividendPerShare" }],
+  
+  // 期末配当
+  "jppfs_cor:FinalDividendPerShare": [{ path: "dividend", field: "finalDividendPerShare" }],
+  "jppfs_cor:YearEndDividendPerShare": [{ path: "dividend", field: "finalDividendPerShare" }],
+  "jppfs_cor:FinalDividendPaidPerShare": [{ path: "dividend", field: "finalDividendPerShare" }],
+  
+  // 配当金支払総額
+  "jppfs_cor:DividendsPaid": [{ path: "dividend", field: "totalDividendPaid" }],
+  "jppfs_cor:DividendsPaidToOwnersOfParent": [{ path: "dividend", field: "totalDividendPaid" }],
+  "jppfs_cor:CashDividendsPaid": [{ path: "dividend", field: "totalDividendPaid" }],
+  
+  // ========== EPS追加タグ ==========
+  "jppfs_cor:NetIncomePerShare": [{ path: "incomeStatement", field: "eps" }],
+  "jppfs_cor:EarningsPerShare": [{ path: "incomeStatement", field: "eps" }],
+  "jpdei_cor:BasicEarningsLossPerShareDEI": [{ path: "incomeStatement", field: "eps" }],
+  
+  // jpcrp_cor プレフィックス（有価証券報告書の経理の状況）
+  "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults": [{ path: "incomeStatement", field: "eps" }],
+  "jpcrp_cor:DilutedEarningsPerShareSummaryOfBusinessResults": [{ path: "incomeStatement", field: "eps" }],
+  
+  // 配当金（jpcrp_cor）
+  "jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults": [{ path: "dividend", field: "annualDividendPerShare" }],
+  "jpcrp_cor:AnnualDividendPerShareSummaryOfBusinessResults": [{ path: "dividend", field: "annualDividendPerShare" }],
+  "jpcrp_cor:InterimDividendPaidPerShareSummaryOfBusinessResults": [{ path: "dividend", field: "interimDividendPerShare" }],
+  "jpcrp_cor:YearEndDividendPerShareSummaryOfBusinessResults": [{ path: "dividend", field: "finalDividendPerShare" }],
+  
+  // 配当金支払（キャッシュフロー計算書から）
+  "jppfs_cor:CashDividendsPaidFinCF": [{ path: "dividend", field: "totalDividendPaid" }],
+  "jppfs_cor:DividendsPaidFinCF": [{ path: "dividend", field: "totalDividendPaid" }],
 };
 
 /**
@@ -323,6 +366,14 @@ export function formatFinancialOutput(fs: FinancialStatements): object {
     },
     
     aiSummary: fs.summary,
+    
+    dividend: {
+      annualDividendPerShare: fs.dividend.annualDividendPerShare ? `¥${fs.dividend.annualDividendPerShare}` : null,
+      interimDividendPerShare: fs.dividend.interimDividendPerShare ? `¥${fs.dividend.interimDividendPerShare}` : null,
+      finalDividendPerShare: fs.dividend.finalDividendPerShare ? `¥${fs.dividend.finalDividendPerShare}` : null,
+      payoutRatio: fs.dividend.payoutRatio ? `${fs.dividend.payoutRatio}%` : null,
+      totalDividendPaid: toOku(fs.dividend.totalDividendPaid),
+    },
     
     rawData: fs, // 元データも含める
   };

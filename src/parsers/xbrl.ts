@@ -74,6 +74,16 @@ export interface FinancialStatements {
     quickRatio: number | null; // 当座比率
   };
   
+  // 配当情報
+  dividend: {
+    annualDividendPerShare: number | null; // 年間配当金（1株当たり）
+    interimDividendPerShare: number | null; // 中間配当金
+    finalDividendPerShare: number | null; // 期末配当金
+    dividendYield: number | null; // 配当利回り（%）
+    payoutRatio: number | null; // 配当性向（%）
+    totalDividendPaid: number | null; // 配当金支払総額
+  };
+  
   // AI向けサマリー
   summary: {
     highlights: string[];
@@ -168,6 +178,11 @@ export function calculateMetrics(fs: FinancialStatements): void {
   // フリーキャッシュフロー = 営業CF + 投資CF
   if (fs.cashFlow.operatingCF !== null && fs.cashFlow.investingCF !== null) {
     fs.cashFlow.freeCashFlow = fs.cashFlow.operatingCF + fs.cashFlow.investingCF;
+  }
+  
+  // 配当性向 = 年間配当 / EPS * 100
+  if (fs.dividend.annualDividendPerShare !== null && fs.incomeStatement.eps !== null && fs.incomeStatement.eps > 0) {
+    fs.dividend.payoutRatio = Math.round((fs.dividend.annualDividendPerShare / fs.incomeStatement.eps) * 10000) / 100;
   }
 }
 
@@ -293,6 +308,14 @@ export function createEmptyFinancialStatements(): FinancialStatements {
       debtToEquity: null,
       currentRatio: null,
       quickRatio: null,
+    },
+    dividend: {
+      annualDividendPerShare: null,
+      interimDividendPerShare: null,
+      finalDividendPerShare: null,
+      dividendYield: null,
+      payoutRatio: null,
+      totalDividendPaid: null,
     },
     summary: {
       highlights: [],
