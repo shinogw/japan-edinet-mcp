@@ -26,6 +26,7 @@ import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-even
 import { generateMockTrendAnalysis, TrendAnalysis } from "./analysis/trend-analysis.js";
 import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js";
 import { resolveToBusinessDay } from "./utils/business-day.js";
+import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
 
 // Create server instance
 const server = new Server(
@@ -215,6 +216,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "get_investment_recommendation",
         description: "【投資助言業登録に基づく】企業の財務データを分析し、投資推奨レーティング（STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL）を生成します。ROE・ROA・営業利益率・D/Eレシオ等を総合評価し、法的根拠付きの投資判断を提供します。AIエージェントが自分で分析すると約50,000トークン消費しますが、このMCPなら1回のAPI呼び出しで完了します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁、例: 7203）",
+            },
+            companyName: {
+              type: "string",
+              description: "企業名（部分一致検索）",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "get_investment_verdict",
+        description: "【投資助言業ライセンス活用】企業の財務データを総合評価し、明示的な投資判断（STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL）を提供します。収益性・安定性・成長性・バリュエーションを数値化し、根拠と共に判断を出力。法的免責事項付き。",
         inputSchema: {
           type: "object",
           properties: {
@@ -742,6 +761,147 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   "指標の自動計算と比較",
                   "業界平均との比較",
                 ],
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "get_investment_verdict": {
+        const { secCode, companyName } = args as {
+          secCode?: string;
+          companyName?: string;
+        };
+
+        // 企業の財務データを取得
+        let documents: Document[] = [];
+        const searchPeriods = [30, 90, 180, 365];
+        
+        for (const days of searchPeriods) {
+          if (documents.length > 0) break;
+          
+          const endDate = new Date().toISOString().split("T")[0];
+          const startDate = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() - days);
+            return d.toISOString().split("T")[0];
+          })();
+
+          if (secCode) {
+            documents = await client.searchBySecCode(secCode, startDate, endDate);
+          } else if (companyName) {
+            const d = new Date(endDate);
+            for (let i = 0; i < Math.min(days, 60) && documents.length < 10; i++) {
+              const dateStr = d.toISOString().split("T")[0];
+              try {
+                const response = await client.getDocumentList({ date: dateStr, type: "2" });
+                const filtered = response.results.filter(
+                  (doc) => doc.filerName && doc.filerName.includes(companyName)
+                );
+                documents.push(...filtered);
+              } catch (error) {
+                // Skip errors
+              }
+              d.setDate(d.getDate() - 1);
+            }
+          }
+          
+          const reportDocs = documents.filter(
+            (doc) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
+          );
+          if (reportDocs.length > 0) break;
+        }
+
+        const reportDocs = documents.filter(
+          (doc) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
+        );
+
+        if (reportDocs.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "No financial reports found",
+                  message: "指定された企業の財務報告書が見つかりません。証券コードまたは企業名を確認してください。",
+                  query: { secCode, companyName },
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        const latestDoc = reportDocs[0];
+        
+        // XBRLを解析して投資判断を生成
+        try {
+          if (latestDoc.xbrlFlag === "1") {
+            const xbrlZip = await client.getDocument(latestDoc.docID, "1");
+            const parsedFs = await parseXbrlFromZip(xbrlZip);
+            
+            // 基本情報を更新
+            parsedFs.companyName = parsedFs.companyName || latestDoc.filerName;
+            parsedFs.secCode = parsedFs.secCode || latestDoc.secCode;
+            
+            // 投資判断を生成
+            const verdict = generateInvestmentVerdict(parsedFs);
+            
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    status: "success",
+                    company: {
+                      name: parsedFs.companyName,
+                      secCode: parsedFs.secCode,
+                      reportType: DOC_TYPE_MAP[latestDoc.docTypeCode] || latestDoc.docDescription,
+                      reportDate: latestDoc.submitDateTime,
+                    },
+                    verdict: {
+                      judgment: verdict.verdict,
+                      judgmentLabel: verdict.verdictLabel,
+                      confidence: `${Math.round(verdict.confidence * 100)}%`,
+                      overallScore: verdict.scores.overall,
+                    },
+                    scores: verdict.scores,
+                    rationale: verdict.rationale,
+                    risks: verdict.risks,
+                    disclaimer: verdict.disclaimer,
+                    metadata: {
+                      analysisDate: verdict.analysisDate,
+                      dataSource: verdict.dataSource,
+                    },
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+        } catch (parseError) {
+          console.error("XBRL parse error:", parseError);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "Analysis failed",
+                  message: "財務データの解析に失敗しました。",
+                  query: { secCode, companyName },
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: "No XBRL data",
+                message: "XBRL形式の財務データが見つかりませんでした。",
+                query: { secCode, companyName },
               }, null, 2),
             },
           ],
