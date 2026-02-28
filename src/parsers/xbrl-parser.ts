@@ -328,7 +328,118 @@ export function formatFinancialOutput(fs: FinancialStatements): object {
     return `${(val / 100000000).toFixed(1)}億円`;
   };
 
+  // ======== 判断支援: シグナル評価 ========
+  const evaluateMetricSignal = (
+    value: number | null,
+    benchmarks: { excellent: number; good: number; poor: number },
+    reverse: boolean = false
+  ): { signal: "POSITIVE" | "NEUTRAL" | "NEGATIVE"; context: string } | null => {
+    if (value === null) return null;
+    if (reverse) {
+      if (value <= benchmarks.excellent) return { signal: "POSITIVE", context: "低負債で健全" };
+      if (value <= benchmarks.good) return { signal: "NEUTRAL", context: "標準的な水準" };
+      return { signal: "NEGATIVE", context: "高めの水準" };
+    }
+    if (value >= benchmarks.excellent) return { signal: "POSITIVE", context: "業界平均を大きく上回る" };
+    if (value >= benchmarks.good) return { signal: "NEUTRAL", context: "業界平均並み" };
+    return { signal: "NEGATIVE", context: "業界平均を下回る" };
+  };
+
+  // 健全性スコア計算
+  const calculateHealthScore = (): { score: number; grade: string } => {
+    let totalScore = 0;
+    let count = 0;
+
+    if (fs.metrics.roe !== null) {
+      totalScore += Math.min(25, Math.max(0, fs.metrics.roe * 1.5));
+      count++;
+    }
+    if (fs.metrics.roa !== null) {
+      totalScore += Math.min(20, Math.max(0, fs.metrics.roa * 2));
+      count++;
+    }
+    if (fs.metrics.operatingMargin !== null) {
+      totalScore += Math.min(20, Math.max(0, fs.metrics.operatingMargin * 1.2));
+      count++;
+    }
+    if (fs.metrics.currentRatio !== null) {
+      totalScore += Math.min(15, Math.max(0, fs.metrics.currentRatio * 7.5));
+      count++;
+    }
+    if (fs.metrics.debtToEquity !== null) {
+      totalScore += Math.min(20, Math.max(0, 20 - fs.metrics.debtToEquity * 10));
+      count++;
+    }
+
+    if (count === 0) return { score: 50, grade: "データ不足" };
+    
+    const score = Math.round((totalScore / (count * 20)) * 100);
+    let grade: string;
+    if (score >= 80) grade = "A (優良)";
+    else if (score >= 60) grade = "B (良好)";
+    else if (score >= 40) grade = "C (標準)";
+    else if (score >= 20) grade = "D (注意)";
+    else grade = "E (懸念)";
+
+    return { score, grade };
+  };
+
+  const healthScore = calculateHealthScore();
+  const roeSignal = evaluateMetricSignal(fs.metrics.roe, { excellent: 15, good: 10, poor: 5 });
+  const roaSignal = evaluateMetricSignal(fs.metrics.roa, { excellent: 8, good: 5, poor: 2 });
+  const marginSignal = evaluateMetricSignal(fs.metrics.operatingMargin, { excellent: 15, good: 8, poor: 3 });
+  const debtSignal = evaluateMetricSignal(fs.metrics.debtToEquity, { excellent: 0.5, good: 1.0, poor: 2.0 }, true);
+
+  // 総合シグナル判定
+  const signals = [roeSignal, roaSignal, marginSignal, debtSignal].filter(s => s !== null);
+  const positiveCount = signals.filter(s => s?.signal === "POSITIVE").length;
+  const negativeCount = signals.filter(s => s?.signal === "NEGATIVE").length;
+  
+  let overallSignal: "POSITIVE" | "NEUTRAL" | "NEGATIVE";
+  if (positiveCount >= 2 && negativeCount === 0) overallSignal = "POSITIVE";
+  else if (negativeCount >= 2) overallSignal = "NEGATIVE";
+  else overallSignal = "NEUTRAL";
+
   return {
+    // ======== 判断サマリー（トークン効率重視） ========
+    judgmentSummary: {
+      healthScore: healthScore.score,
+      healthGrade: healthScore.grade,
+      overallSignal,
+      keyHighlights: fs.summary.highlights.slice(0, 3),
+      concerns: fs.summary.risks.slice(0, 3),
+      actionHint: overallSignal === "POSITIVE" 
+        ? "詳細分析の価値あり" 
+        : overallSignal === "NEGATIVE" 
+          ? "慎重な追加調査が必要" 
+          : "リスク要因の詳細確認を推奨",
+    },
+
+    // ======== シグナル付き指標 ========
+    signalMetrics: {
+      roe: {
+        value: fs.metrics.roe ? `${fs.metrics.roe}%` : null,
+        signal: roeSignal?.signal ?? null,
+        context: roeSignal?.context ?? null,
+      },
+      roa: {
+        value: fs.metrics.roa ? `${fs.metrics.roa}%` : null,
+        signal: roaSignal?.signal ?? null,
+        context: roaSignal?.context ?? null,
+      },
+      operatingMargin: {
+        value: fs.metrics.operatingMargin ? `${fs.metrics.operatingMargin}%` : null,
+        signal: marginSignal?.signal ?? null,
+        context: marginSignal?.context ?? null,
+      },
+      debtToEquity: {
+        value: fs.metrics.debtToEquity,
+        signal: debtSignal?.signal ?? null,
+        context: debtSignal?.context ?? null,
+      },
+    },
+
+    // ======== 基本情報 ========
     company: {
       name: fs.companyName,
       secCode: fs.secCode,
