@@ -183,6 +183,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "分析期間（latest=最新、annual=通期、quarterly=四半期）",
             },
+            detail: {
+              type: "string",
+              enum: ["compact", "standard", "full"],
+              description: "出力詳細度（compact=判断サマリーのみ~100トークン、standard=主要指標含む~500トークン、full=全データ~2000トークン）。デフォルトはstandard。",
+            },
           },
           required: [],
         },
@@ -499,10 +504,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "analyze_financials": {
-        const { secCode, companyName, period = "latest" } = args as {
+        const { secCode, companyName, period = "latest", detail = "standard" } = args as {
           secCode?: string;
           companyName?: string;
           period?: string;
+          detail?: "compact" | "standard" | "full";
         };
 
         // Find the company's latest filing (progressive search: 30 -> 90 -> 180 -> 365 days)
@@ -610,19 +616,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           console.error("XBRL parse error:", parseError);
         }
         
+        // AI消費最適化: detailレベルに応じた出力
+        let outputData: object;
+        const fullData = financialData as any;
+        
+        if (detail === "compact") {
+          // ~100トークン: 判断サマリーのみ
+          outputData = {
+            status: "success",
+            company: fullData?.company?.name || latestDoc.filerName,
+            secCode: fullData?.company?.secCode || latestDoc.secCode,
+            judgmentSummary: fullData?.judgmentSummary || null,
+            tokenEfficiency: "compact (~100 tokens)",
+          };
+        } else if (detail === "full") {
+          // ~2000トークン: 全データ
+          outputData = {
+            status: financialData ? "success" : "partial",
+            message: financialData 
+              ? "財務データを取得・解析しました。"
+              : "財務報告書を検出しましたが、XBRLデータの解析に一部失敗しました。",
+            document: formatDocument(latestDoc),
+            financialAnalysis: financialData,
+            availableDocuments: reportDocs.slice(0, 5).map(formatDocument),
+            tokenEfficiency: "full (~2000 tokens)",
+          };
+        } else {
+          // standard: ~500トークン（デフォルト）
+          outputData = {
+            status: "success",
+            company: fullData?.company || { name: latestDoc.filerName, secCode: latestDoc.secCode },
+            judgmentSummary: fullData?.judgmentSummary || null,
+            signalMetrics: fullData?.signalMetrics || null,
+            accountingInfo: fullData?.accountingInfo || null,
+            incomeStatement: fullData?.incomeStatement || null,
+            metrics: fullData?.metrics || null,
+            aiSummary: fullData?.aiSummary || null,
+            tokenEfficiency: "standard (~500 tokens)",
+          };
+        }
+        
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({
-                status: financialData ? "success" : "partial",
-                message: financialData 
-                  ? "財務データを取得・解析しました。"
-                  : "財務報告書を検出しましたが、XBRLデータの解析に一部失敗しました。",
-                document: formatDocument(latestDoc),
-                financialAnalysis: financialData,
-                availableDocuments: reportDocs.slice(0, 5).map(formatDocument),
-              }, null, 2),
+              text: JSON.stringify(outputData, null, 2),
             },
           ],
         };
