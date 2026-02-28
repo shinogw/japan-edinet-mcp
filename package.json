@@ -1,6 +1,6 @@
 {
   "name": "japan-edinet-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "日本株決算データMCPサーバー - EDINET連携で有価証券報告書・決算短信をAIエージェントに提供",
   "type": "module",
   "main": "dist/index.js",

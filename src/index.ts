@@ -25,6 +25,7 @@ import { scanDailyLargeShareholderReports, LargeShareholderReport } from "./anal
 import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-events.js";
 import { generateMockTrendAnalysis, TrendAnalysis } from "./analysis/trend-analysis.js";
 import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js";
+import { resolveToBusinessDay } from "./utils/business-day.js";
 
 // Create server instance
 const server = new Server(
@@ -695,7 +696,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "detect_earnings_revisions": {
         const { date } = args as { date?: string };
         
-        const targetDate = date || new Date().toISOString().split("T")[0];
+        // 営業日を自動解決（土日祝日なら直近の営業日を取得）
+        const resolved = resolveToBusinessDay(date);
+        const targetDate = resolved.date;
         
         try {
           const response = await client.getDocumentList({ date: targetDate, type: "2" });
@@ -709,6 +712,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   status: "success",
                   tokenSaved: "~1,000,000 tokens (vs reading all disclosures)",
                   date: targetDate,
+                  ...(resolved.message ? { businessDayNote: resolved.message } : {}),
                   totalDocuments: response.metadata.resultset.count,
                   revisionsFound: revisions.length,
                   revisions: revisions.map((r) => ({
@@ -748,7 +752,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "detect_large_shareholders": {
         const { date } = args as { date?: string };
         
-        const targetDate = date || new Date().toISOString().split("T")[0];
+        // 営業日を自動解決
+        const resolved = resolveToBusinessDay(date);
+        const targetDate = resolved.date;
         
         try {
           const response = await client.getDocumentList({ date: targetDate, type: "2" });
@@ -762,6 +768,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   status: "success",
                   tokenSaved: "~500,000 tokens (vs reading all 5% reports)",
                   date: targetDate,
+                  ...(resolved.message ? { businessDayNote: resolved.message } : {}),
                   totalDocuments: response.metadata.resultset.count,
                   reportsFound: reports.length,
                   reports: reports.map((r) => ({
@@ -804,7 +811,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "detect_material_events": {
         const { date, minImpact } = args as { date?: string; minImpact?: string };
         
-        const targetDate = date || new Date().toISOString().split("T")[0];
+        // 営業日を自動解決
+        const resolved = resolveToBusinessDay(date);
+        const targetDate = resolved.date;
         
         try {
           const response = await client.getDocumentList({ date: targetDate, type: "2" });
@@ -829,6 +838,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   status: "success",
                   tokenSaved: "~2,000,000 tokens (vs reading all extraordinary reports)",
                   date: targetDate,
+                  ...(resolved.message ? { businessDayNote: resolved.message } : {}),
                   totalDocuments: response.metadata.resultset.count,
                   eventsFound: events.length,
                   criticalEvents: criticalCount,
