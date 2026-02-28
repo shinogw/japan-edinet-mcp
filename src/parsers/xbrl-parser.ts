@@ -255,7 +255,50 @@ export async function parseXbrlFromZip(zipBuffer: ArrayBuffer): Promise<Financia
 
       // 会計期間を取得
       const periodEnd = extractTextValue(root, ["jpdei_cor:CurrentFiscalYearEndDateDEI", "CurrentFiscalYearEndDateDEI"]);
-      if (periodEnd) fs.fiscalYear = periodEnd.substring(0, 4);
+      if (periodEnd) {
+        fs.fiscalYear = periodEnd.substring(0, 4);
+        // 決算月を抽出（例: 2025-03-31 → 3）
+        const match = periodEnd.match(/-(\d{2})-/);
+        if (match) {
+          fs.accountingInfo.fiscalYearEndMonth = parseInt(match[1], 10);
+        }
+      }
+
+      // ===== 日本特化: 会計基準の自動判定 =====
+      
+      // 会計基準（JGAAP/IFRS/US-GAAP）
+      const accountingStd = extractTextValue(root, ["jpdei_cor:AccountingStandardsDEI", "AccountingStandardsDEI"]);
+      if (accountingStd) {
+        if (accountingStd.includes("Japan") || accountingStd.includes("日本")) {
+          fs.accountingInfo.standard = "JGAAP";
+        } else if (accountingStd.includes("IFRS") || accountingStd.includes("国際")) {
+          fs.accountingInfo.standard = "IFRS";
+        } else if (accountingStd.includes("US") || accountingStd.includes("米国")) {
+          fs.accountingInfo.standard = "US-GAAP";
+        }
+      }
+
+      // 連結/単体の判定
+      const isConsolidated = extractTextValue(root, [
+        "jpdei_cor:WhetherConsolidatedFinancialStatementsArePreparedDEI",
+        "WhetherConsolidatedFinancialStatementsArePreparedDEI"
+      ]);
+      if (isConsolidated) {
+        const consolidatedStr = String(isConsolidated).toLowerCase();
+        if (consolidatedStr === "true" || consolidatedStr.includes("連結") || consolidatedStr.includes("yes")) {
+          fs.accountingInfo.consolidation = "連結";
+        } else if (consolidatedStr === "false" || consolidatedStr.includes("単体") || consolidatedStr.includes("no")) {
+          fs.accountingInfo.consolidation = "単体";
+        }
+      }
+
+      // 業種コードから業種を判定（簡易版）
+      const industryCode = extractTextValue(root, [
+        "jpdei_cor:IndustryCodeWhenConsolidatedFinancialStatementsArePreparedInAccordanceWithIndustrySpecificRegulationsDEI"
+      ]);
+      if (industryCode) {
+        fs.accountingInfo.industry = detectIndustry(industryCode);
+      }
     }
 
     // 指標を計算
@@ -299,6 +342,50 @@ function extractNumericValue(value: any): number | null {
   }
   
   return null;
+}
+
+/**
+ * 業種コードから業種名を判定
+ */
+function detectIndustry(code: string): string | null {
+  const industryMap: Record<string, string> = {
+    // 金融業
+    "CNA": "銀行業",
+    "CNB": "証券業",
+    "CNC": "保険業",
+    "CND": "その他金融業",
+    // 製造業
+    "CMA": "食品",
+    "CMB": "繊維",
+    "CMC": "パルプ・紙",
+    "CMD": "化学",
+    "CME": "医薬品",
+    "CMF": "石油・石炭",
+    "CMG": "ゴム",
+    "CMH": "ガラス・土石",
+    "CMI": "鉄鋼",
+    "CMJ": "非鉄金属",
+    "CMK": "金属製品",
+    "CML": "機械",
+    "CMM": "電気機器",
+    "CMN": "輸送用機器",
+    "CMO": "精密機器",
+    "CMP": "その他製造業",
+    // サービス業
+    "CSA": "建設業",
+    "CSB": "不動産業",
+    "CSC": "陸運業",
+    "CSD": "海運業",
+    "CSE": "空運業",
+    "CSF": "倉庫・運輸",
+    "CSG": "情報・通信",
+    "CSH": "電気・ガス",
+    "CSI": "小売業",
+    "CSJ": "卸売業",
+    "CSK": "サービス業",
+  };
+  
+  return industryMap[code] || null;
 }
 
 /**
@@ -445,6 +532,20 @@ export function formatFinancialOutput(fs: FinancialStatements): object {
       secCode: fs.secCode,
       fiscalYear: fs.fiscalYear,
       reportType: fs.reportType,
+    },
+    
+    // ======== 日本特化: 会計基準情報 ========
+    accountingInfo: {
+      standard: fs.accountingInfo.standard,
+      standardLabel: fs.accountingInfo.standard === "JGAAP" ? "日本基準" 
+        : fs.accountingInfo.standard === "IFRS" ? "国際会計基準"
+        : fs.accountingInfo.standard === "US-GAAP" ? "米国基準"
+        : "不明",
+      consolidation: fs.accountingInfo.consolidation,
+      industry: fs.accountingInfo.industry,
+      fiscalYearEndMonth: fs.accountingInfo.fiscalYearEndMonth 
+        ? `${fs.accountingInfo.fiscalYearEndMonth}月決算` 
+        : null,
     },
     
     incomeStatement: {

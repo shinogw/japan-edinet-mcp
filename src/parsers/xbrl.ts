@@ -12,6 +12,14 @@ export interface FinancialStatements {
   reportType: string;
   submitDate: string;
   
+  // 日本特化: 会計基準情報
+  accountingInfo: {
+    standard: "JGAAP" | "IFRS" | "US-GAAP" | "UNKNOWN";
+    consolidation: "連結" | "単体" | "UNKNOWN";
+    industry: string | null;  // 業種
+    fiscalYearEndMonth: number | null;  // 決算月（3=3月決算）
+  };
+  
   // 貸借対照表 (Balance Sheet)
   balanceSheet: {
     // 資産
@@ -262,6 +270,12 @@ export function createEmptyFinancialStatements(): FinancialStatements {
     fiscalPeriod: "",
     reportType: "",
     submitDate: "",
+    accountingInfo: {
+      standard: "UNKNOWN",
+      consolidation: "UNKNOWN",
+      industry: null,
+      fiscalYearEndMonth: null,
+    },
     balanceSheet: {
       totalAssets: null,
       currentAssets: null,
