@@ -505,32 +505,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           period?: string;
         };
 
-        // Find the company's latest filing
-        const endDate = new Date().toISOString().split("T")[0];
-        const startDate = (() => {
-          const d = new Date();
-          d.setDate(d.getDate() - 90); // Last 90 days
-          return d.toISOString().split("T")[0];
-        })();
-
+        // Find the company's latest filing (progressive search: 30 -> 90 -> 180 -> 365 days)
         let documents: Document[] = [];
+        const searchPeriods = [30, 90, 180, 365];
         
-        if (secCode) {
-          documents = await client.searchBySecCode(secCode, startDate, endDate);
-        } else if (companyName) {
-          const d = new Date(endDate);
-          for (let i = 0; i < 30 && documents.length < 10; i++) {
-            const dateStr = d.toISOString().split("T")[0];
-            try {
-              const response = await client.getDocumentList({ date: dateStr, type: "2" });
-              const filtered = response.results.filter(
-                (doc) => doc.filerName.includes(companyName)
-              );
-              documents.push(...filtered);
-            } catch (error) {
-              // Skip errors
+        for (const days of searchPeriods) {
+          if (documents.length > 0) break;
+          
+          const endDate = new Date().toISOString().split("T")[0];
+          const startDate = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() - days);
+            return d.toISOString().split("T")[0];
+          })();
+
+          if (secCode) {
+            documents = await client.searchBySecCode(secCode, startDate, endDate);
+          } else if (companyName) {
+            const d = new Date(endDate);
+            for (let i = 0; i < days && documents.length < 10; i++) {
+              const dateStr = d.toISOString().split("T")[0];
+              try {
+                const response = await client.getDocumentList({ date: dateStr, type: "2" });
+                const filtered = response.results.filter(
+                  (doc) => doc.filerName && doc.filerName.includes(companyName)
+                );
+                documents.push(...filtered);
+              } catch (error) {
+                // Skip errors
+              }
+              d.setDate(d.getDate() - 1);
             }
-            d.setDate(d.getDate() - 1);
+          }
+          
+          // Filter for financial reports early to stop search if found
+          const reportDocs = documents.filter(
+            (doc) => 
+              doc.docTypeCode === "120" || // 有価証券報告書
+              doc.docTypeCode === "140" || // 四半期報告書
+              doc.docTypeCode === "160"    // 半期報告書
+          );
+          if (reportDocs.length > 0) {
+            documents = documents; // Found reports, exit loop
+            break;
           }
         }
 
