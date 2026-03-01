@@ -31,7 +31,11 @@ export interface FinancialStatements {
     nonCurrentAssets: number | null;
     tangibleAssets: number | null;
     intangibleAssets: number | null;
-    investments: number | null;
+    investments: number | null;           // 投資その他の資産（広義）
+    investmentSecurities: number | null;   // 投資有価証券
+    investmentProperty: number | null;     // 投資不動産
+    securities: number | null;             // 有価証券（流動資産）
+    treasuryShares: number | null;         // 自己株式（マイナス値）
     
     // 負債
     totalLiabilities: number | null;
@@ -286,6 +290,10 @@ export function createEmptyFinancialStatements(): FinancialStatements {
       tangibleAssets: null,
       intangibleAssets: null,
       investments: null,
+      investmentSecurities: null,
+      investmentProperty: null,
+      securities: null,
+      treasuryShares: null,
       totalLiabilities: null,
       currentLiabilities: null,
       accountsPayable: null,

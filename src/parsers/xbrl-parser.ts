@@ -92,6 +92,22 @@ const VALUE_EXTRACTORS: Record<string, { path: string; field: keyof any }[]> = {
   
   "jppfs_cor:InvestmentsAndOtherAssets": [{ path: "balanceSheet", field: "investments" }],
   
+  // 投資有価証券（清原式NC用）
+  "jppfs_cor:InvestmentSecurities": [{ path: "balanceSheet", field: "investmentSecurities" }],
+  "jppfs_cor:SecuritiesInvestment": [{ path: "balanceSheet", field: "investmentSecurities" }],
+  
+  // 投資不動産
+  "jppfs_cor:InvestmentProperty": [{ path: "balanceSheet", field: "investmentProperty" }],
+  "jppfs_cor:RealEstateForInvestment": [{ path: "balanceSheet", field: "investmentProperty" }],
+  
+  // 有価証券（流動資産）
+  "jppfs_cor:Securities": [{ path: "balanceSheet", field: "securities" }],
+  "jppfs_cor:MarketableSecurities": [{ path: "balanceSheet", field: "securities" }],
+  
+  // 自己株式
+  "jppfs_cor:TreasuryShares": [{ path: "balanceSheet", field: "treasuryShares" }],
+  "jppfs_cor:TreasuryStock": [{ path: "balanceSheet", field: "treasuryShares" }],
+  
   // 負債
   "jppfs_cor:Liabilities": [{ path: "balanceSheet", field: "totalLiabilities" }],
   "jppfs_cor:TotalLiabilities": [{ path: "balanceSheet", field: "totalLiabilities" }],
