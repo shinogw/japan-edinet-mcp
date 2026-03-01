@@ -26,6 +26,7 @@ import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-even
 import { generateMockTrendAnalysis, TrendAnalysis } from "./analysis/trend-analysis.js";
 import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js";
 import { resolveToBusinessDay } from "./utils/business-day.js";
+import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.js";
 import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
 
 // Create server instance
@@ -247,6 +248,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: [],
+        },
+      },
+      {
+        name: "get_stock_info",
+        description: "【リアルタイム株価】企業の現在株価・時価総額・PER・PBR・配当利回り・EPS等を取得します。Yahoo Finance APIから最新データを取得。清原式ネットキャッシュ分析やバリュエーション分析に必要な時価総額データも提供します。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁 or 5桁、例: 7203 or 72030）",
+            },
+          },
+          required: ["secCode"],
         },
       },
       {
@@ -906,6 +921,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "get_stock_info": {
+        const { secCode } = args as { secCode: string };
+        
+        try {
+          const quote = await getStockQuote(secCode);
+          
+          if (!quote) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "Stock not found",
+                  message: "株価データを取得できませんでした。証券コードを確認してください。",
+                  query: { secCode },
+                }, null, 2),
+              }],
+            };
+          }
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                stockInfo: formatStockQuote(quote),
+                rawData: {
+                  marketCap: quote.marketCap,
+                  per: quote.per,
+                  pbr: quote.pbr,
+                  eps: quote.eps,
+                  sharesOutstanding: quote.sharesOutstanding,
+                  price: quote.price,
+                },
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Failed to get stock info",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
       }
 
       case "detect_earnings_revisions": {
