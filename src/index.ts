@@ -27,6 +27,7 @@ import { generateMockTrendAnalysis, TrendAnalysis } from "./analysis/trend-analy
 import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js";
 import { resolveToBusinessDay } from "./utils/business-day.js";
 import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.js";
+import { getEPSHistory, EPSAnalysis } from "./analysis/eps-history.js";
 import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
 
 // Create server instance
@@ -248,6 +249,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: [],
+        },
+      },
+      {
+        name: "get_eps_history",
+        description: "【EPS成長分析】企業の過去数年間のEPS（1株当たり利益）推移を分析します。EPS成長率、CAGR、連続増益年数、成長トレンド判定を提供。バリュー投資でのEPS成長性評価に不可欠なデータです。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁 or 5桁、例: 7203 or 72030）",
+            },
+          },
+          required: ["secCode"],
         },
       },
       {
@@ -921,6 +936,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "get_eps_history": {
+        const { secCode } = args as { secCode: string };
+        
+        try {
+          const analysis = await getEPSHistory(secCode);
+          
+          if (!analysis) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "EPS history not found",
+                  message: "EPS履歴を取得できませんでした。証券コードを確認してください。",
+                  query: { secCode },
+                }, null, 2),
+              }],
+            };
+          }
+          
+          const toOku = (val: number | null): string | null => {
+            if (val === null) return null;
+            return (val / 100000000).toFixed(1) + "億円";
+          };
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                company: analysis.company,
+                secCode: analysis.secCode,
+                currentEPS: analysis.currentEPS ? "¥" + analysis.currentEPS.toFixed(1) : null,
+                epsHistory: analysis.history.map(h => ({
+                  year: h.fiscalYear,
+                  eps: h.eps ? "¥" + h.eps.toFixed(1) : null,
+                  netIncome: toOku(h.netIncome),
+                  revenue: toOku(h.revenue),
+                })),
+                growth: {
+                  epsGrowthRates: analysis.epsGrowthRates,
+                  epsCAGR: analysis.epsCAGR,
+                  consecutiveGrowthYears: analysis.consecutiveGrowthYears,
+                  isGrowing: analysis.isGrowing,
+                  assessment: analysis.growthAssessment,
+                },
+                maxEPS: analysis.maxEPS ? {
+                  value: "¥" + analysis.maxEPS.value.toFixed(1),
+                  year: analysis.maxEPS.year,
+                } : null,
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Failed to get EPS history",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
       }
 
       case "get_stock_info": {
