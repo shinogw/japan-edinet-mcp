@@ -29,6 +29,7 @@ import { resolveToBusinessDay } from "./utils/business-day.js";
 import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.js";
 import { getEPSHistory, EPSAnalysis } from "./analysis/eps-history.js";
 import { calculateNetCash, formatNetCashAnalysis } from "./analysis/net-cash.js";
+import { analyzeDhandho, formatDhandhoAnalysis } from "./analysis/dhandho.js";
 import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
 import { runScreening, ScreeningCriteria, ScreeningOutput } from "./analysis/screening.js";
 
@@ -406,6 +407,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: [],
+        },
+      },
+      {
+name: "analyze_dhandho",
+        description: "【ダンドー分析】モニッシュ・パブライのダンドー投資法に基づく「大きく勝ち、小さく負ける」賭けの評価。上昇余地（PER水準×EPS成長）、下値限定（PBR・NC比率・配当）、確率（ROE・FCF・負債水準）の3軸でスコアリング。清原式ネットキャッシュ分析も内部で自動実行。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁 or 5桁、例: 7203 or 72030）",
+            },
+          },
+          required: ["secCode"],
         },
       },
     ],
@@ -1056,6 +1071,84 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+
+      case "analyze_dhandho": {
+        const { secCode } = args as { secCode: string };
+        
+        // 1. 財務データ取得（analyze_net_cashと同じロジック）
+        let documents: any[] = [];
+        const searchPeriods = [30, 90, 180, 365];
+        
+        for (const days of searchPeriods) {
+          if (documents.length > 0) break;
+          const endDate = new Date().toISOString().split("T")[0];
+          const startDate = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() - days);
+            return d.toISOString().split("T")[0];
+          })();
+          documents = await client.searchBySecCode(secCode, startDate, endDate);
+          const reportDocs = documents.filter(
+            (doc: any) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
+          );
+          if (reportDocs.length > 0) break;
+        }
+
+        const reportDocs = documents.filter(
+          (doc: any) => (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") && doc.xbrlFlag === "1"
+        );
+
+        if (reportDocs.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "No financial reports found",
+                message: "財務報告書が見つかりません。証券コードを確認してください。",
+              }, null, 2),
+            }],
+          };
+        }
+
+        try {
+          const xbrlZip = await client.getDocument(reportDocs[0].docID, "1");
+          const parsedFs = await parseXbrlFromZip(xbrlZip);
+          parsedFs.companyName = parsedFs.companyName || reportDocs[0].filerName;
+          parsedFs.secCode = parsedFs.secCode || reportDocs[0].secCode;
+          
+          // 2. NC分析
+          const ncAnalysis = await calculateNetCash(parsedFs, secCode);
+          
+          // 3. 株価取得
+          const { getStockQuote } = await import("./api/stock-price.js");
+          const quote = await getStockQuote(secCode);
+          
+          // 4. ダンドー分析
+          const dhandho = await analyzeDhandho(parsedFs, ncAnalysis, quote);
+          const formatted = formatDhandhoAnalysis(dhandho);
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                ...formatted,
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Dhandho analysis failed",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+      }
       case "get_eps_history": {
         const { secCode } = args as { secCode: string };
         
