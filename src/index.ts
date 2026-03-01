@@ -30,6 +30,7 @@ import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.j
 import { getEPSHistory, EPSAnalysis } from "./analysis/eps-history.js";
 import { calculateNetCash, formatNetCashAnalysis } from "./analysis/net-cash.js";
 import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
+import { runScreening, ScreeningCriteria, ScreeningOutput } from "./analysis/screening.js";
 
 // Create server instance
 const server = new Server(
@@ -371,6 +372,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             companyName: {
               type: "string",
               description: "企業名（部分一致検索）",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "screen_stocks",
+        description: "【統合スクリーニング】EPS成長性 × PER割安カタリスト × 清原式ネットキャッシュの3軸で銘柄を一括スコアリング。証券コードリスト指定 or EDINET直近開示から自動構築。時価総額フィルタ対応。各銘柄を並列評価し、総合スコアで順位付け。🟢🟢(3条件クリア)→🟢(2条件)→🟡(1条件)→🔴(該当なし)の4段階判定。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCodes: {
+              type: "array",
+              items: { type: "string" },
+              description: "スクリーニング対象の証券コード配列（省略時はEDINET直近開示から自動構築）",
+            },
+            scanDays: {
+              type: "number",
+              description: "secCodes省略時のEDINETスキャン日数（デフォルト: 5）",
+            },
+            maxMarketCapOku: {
+              type: "number",
+              description: "時価総額上限（億円）。例: 1000 = 時価総額1000億円以下",
+            },
+            minMarketCapOku: {
+              type: "number",
+              description: "時価総額下限（億円）",
+            },
+            topN: {
+              type: "number",
+              description: "上位N件を返す（デフォルト: 20）",
             },
           },
           required: [],
@@ -1720,6 +1752,84 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+
+      case "screen_stocks": {
+        const { secCodes, scanDays, maxMarketCapOku, minMarketCapOku, topN } = args as {
+          secCodes?: string[];
+          scanDays?: number;
+          maxMarketCapOku?: number;
+          minMarketCapOku?: number;
+          topN?: number;
+        };
+
+        try {
+          const output = await runScreening({
+            secCodes,
+            scanDays,
+            maxMarketCapOku,
+            minMarketCapOku,
+            topN,
+          });
+
+          // コンパクトな出力フォーマット
+          const compactResults = output.results.map((r) => ({
+            grade: r.grade,
+            gradeLabel: r.gradeLabel,
+            company: r.company,
+            secCode: r.secCode,
+            totalScore: r.totalScore,
+            price: r.price ? `¥${r.price.toLocaleString()}` : null,
+            marketCap: r.marketCapOku ? `${r.marketCapOku}億円` : null,
+            scores: {
+              epsGrowth: r.epsScore,
+              perCatalyst: r.perCatalystScore,
+              netCash: r.netCashScore,
+            },
+            eps: {
+              cagr: r.epsDetail.epsCAGR,
+              consecutiveYears: r.epsDetail.consecutiveGrowthYears,
+              assessment: r.epsDetail.growthAssessment,
+            },
+            valuation: {
+              per: r.per ? `${r.per.toFixed(1)}倍` : null,
+              pbr: r.pbr ? `${r.pbr.toFixed(2)}倍` : null,
+              dividendYield: r.dividendYield ? `${r.dividendYield.toFixed(1)}%` : null,
+              catalysts: r.perCatalystDetail.catalysts,
+            },
+            netCash: {
+              amount: r.netCashDetail.netCashOku,
+              ratio: r.netCashDetail.netCashRatio ? `${r.netCashDetail.netCashRatio.toFixed(1)}%` : null,
+              verdict: r.netCashDetail.verdict,
+            },
+            ...(r.errors ? { errors: r.errors } : {}),
+          }));
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                screening: output.criteria,
+                summary: `${output.scanned}銘柄スキャン → ${output.passed}銘柄通過 → 上位${compactResults.length}件表示`,
+                results: compactResults,
+                ...(output.errors.length > 0 ? { errors: output.errors } : {}),
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Screening failed",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
       }
 
       default:
