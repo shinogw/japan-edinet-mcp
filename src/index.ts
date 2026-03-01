@@ -28,6 +28,7 @@ import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js"
 import { resolveToBusinessDay } from "./utils/business-day.js";
 import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.js";
 import { getEPSHistory, EPSAnalysis } from "./analysis/eps-history.js";
+import { calculateNetCash, formatNetCashAnalysis } from "./analysis/net-cash.js";
 import { generateInvestmentVerdict, InvestmentVerdict } from "./analysis/investment-verdict.js";
 
 // Create server instance
@@ -249,6 +250,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: [],
+        },
+      },
+      {
+        name: "analyze_net_cash",
+        description: "【清原式ネットキャッシュ分析】清原達郎（元タワー投資顧問）の投資手法に基づくネットキャッシュ分析。ネットキャッシュ = 現金預金 + 投資有価証券×70% - 有利子負債。ネットキャッシュ比率（対時価総額）で割安度を判定。バリュー投資の核心指標。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            secCode: {
+              type: "string",
+              description: "証券コード（4桁 or 5桁、例: 7203 or 72030）",
+            },
+          },
+          required: ["secCode"],
         },
       },
       {
@@ -936,6 +951,77 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "analyze_net_cash": {
+        const { secCode } = args as { secCode: string };
+        
+        // 企業の財務データを取得
+        let documents: any[] = [];
+        const searchPeriods = [30, 90, 180, 365];
+        
+        for (const days of searchPeriods) {
+          if (documents.length > 0) break;
+          const endDate = new Date().toISOString().split("T")[0];
+          const startDate = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() - days);
+            return d.toISOString().split("T")[0];
+          })();
+          documents = await client.searchBySecCode(secCode, startDate, endDate);
+          const reportDocs = documents.filter(
+            (doc: any) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
+          );
+          if (reportDocs.length > 0) break;
+        }
+
+        const reportDocs = documents.filter(
+          (doc: any) => (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") && doc.xbrlFlag === "1"
+        );
+
+        if (reportDocs.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "No financial reports found",
+                message: "財務報告書が見つかりません。証券コードを確認してください。",
+                query: { secCode },
+              }, null, 2),
+            }],
+          };
+        }
+
+        try {
+          const xbrlZip = await client.getDocument(reportDocs[0].docID, "1");
+          const parsedFs = await parseXbrlFromZip(xbrlZip);
+          parsedFs.companyName = parsedFs.companyName || reportDocs[0].filerName;
+          parsedFs.secCode = parsedFs.secCode || reportDocs[0].secCode;
+          
+          const analysis = await calculateNetCash(parsedFs, secCode);
+          const formatted = formatNetCashAnalysis(analysis);
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                ...formatted,
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Analysis failed",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
       }
 
       case "get_eps_history": {
