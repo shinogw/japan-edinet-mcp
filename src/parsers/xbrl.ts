@@ -85,6 +85,30 @@ export interface FinancialStatements {
     currentRatio: number | null; // 流動比率
     quickRatio: number | null; // 当座比率
   };
+
+  // バリュエーション指標（EDINET報告値）
+  valuation: {
+    per: number | null; // PER（株価収益率）
+    pbr: number | null; // PBR（株価純資産倍率）
+    bps: number | null; // BPS（1株当たり純資産）
+    marketCap: number | null; // 時価総額（株価 × 自己株式控除後の株式数）
+  };
+
+  // 前期データ（成長率算出用）
+  priorPeriod: {
+    revenue: number | null;
+    operatingIncome: number | null;
+    netIncome: number | null;
+    eps: number | null;
+  };
+
+  // 成長率
+  growth: {
+    revenueGrowth: number | null; // 売上高成長率（%）
+    operatingIncomeGrowth: number | null; // 営業利益成長率（%）
+    netIncomeGrowth: number | null; // 純利益成長率（%）
+    epsGrowth: number | null; // EPS成長率（%）
+  };
   
   // 配当情報
   dividend: {
@@ -96,12 +120,56 @@ export interface FinancialStatements {
     totalDividendPaid: number | null; // 配当金支払総額
   };
   
+  // 書類の期間種別（半期・四半期はPLが期間累計なので年換算に注意）
+  periodType: "annual" | "interim" | "quarterly";
+
+  // 株式数（EDINET提出日時点の発行済株式数・期末自己株式数）
+  shares: {
+    issued: number | null;
+    treasury: number | null;
+    outstanding: number | null; // 発行済 − 自己株式
+  };
+
+  // 前事業年度（通期）の実績。半期・四半期報告書でTTM算出に使う
+  priorFullYear: {
+    revenue: number | null;
+    operatingIncome: number | null;
+    netIncome: number | null;
+    eps: number | null;
+  };
+
+  // 直近12ヶ月（TTM）。通期報告書なら当期と同値
+  trailing: {
+    revenue: number | null;
+    operatingIncome: number | null;
+    netIncome: number | null;
+    eps: number | null;
+  };
+
+  // 主要な経営指標等の推移（有価証券報告書のみ。古い順、最大5期）
+  history: HistoryEntry[];
+
   // AI向けサマリー
   summary: {
     highlights: string[];
     risks: string[];
     outlook: string;
   };
+}
+
+export interface HistoryEntry {
+  periodEnd: string | null; // 例: 2026-05-31
+  revenue: number | null;
+  ordinaryIncome: number | null; // IFRS/US-GAAPは税引前利益
+  netIncome: number | null;
+  eps: number | null;
+  bps: number | null;
+  roe: number | null; // %
+  totalAssets: number | null;
+  netAssets: number | null;
+  operatingCF: number | null;
+  dividendPerShare: number | null;
+  sharesIssued: number | null;
 }
 
 /**
@@ -155,15 +223,44 @@ const XBRL_TAG_MAP: Record<string, string> = {
 export function calculateMetrics(fs: FinancialStatements): void {
   const bs = fs.balanceSheet;
   const is = fs.incomeStatement;
-  
+
+  // 発行済株式数（自己株式控除）
+  if (fs.shares.issued !== null) {
+    fs.shares.outstanding = fs.shares.issued - (fs.shares.treasury ?? 0);
+  }
+
+  // BPS未開示（半期・四半期）の場合は純資産 ÷ 発行済株式数で推定
+  if (fs.valuation.bps === null && bs.netAssets && fs.shares.outstanding) {
+    fs.valuation.bps = Math.round((bs.netAssets / fs.shares.outstanding) * 100) / 100;
+  }
+
+  // TTM = 前期通期 − 前年同期累計 + 当期累計（通期報告書は当期そのまま）
+  const ttm = (field: "revenue" | "operatingIncome" | "netIncome" | "eps"): number | null => {
+    if (fs.periodType === "annual") return is[field];
+    const fy = fs.priorFullYear[field];
+    const prior = fs.priorPeriod[field];
+    const cur = is[field];
+    if (fy === null || prior === null || cur === null) return null;
+    return Math.round((fy - prior + cur) * 100) / 100;
+  };
+  fs.trailing = {
+    revenue: ttm("revenue"),
+    operatingIncome: ttm("operatingIncome"),
+    netIncome: ttm("netIncome"),
+    eps: ttm("eps"),
+  };
+
+  // ROE/ROAは年ベース（半期・四半期はTTM純利益を使用）
+  const annualNetIncome = fs.trailing.netIncome ?? (fs.periodType === "annual" ? is.netIncome : null);
+
   // ROE = 当期純利益 / 自己資本
-  if (is.netIncome && bs.shareholdersEquity && bs.shareholdersEquity > 0) {
-    fs.metrics.roe = Math.round((is.netIncome / bs.shareholdersEquity) * 10000) / 100;
+  if (annualNetIncome && bs.shareholdersEquity && bs.shareholdersEquity > 0) {
+    fs.metrics.roe = Math.round((annualNetIncome / bs.shareholdersEquity) * 10000) / 100;
   }
   
   // ROA = 当期純利益 / 総資産
-  if (is.netIncome && bs.totalAssets && bs.totalAssets > 0) {
-    fs.metrics.roa = Math.round((is.netIncome / bs.totalAssets) * 10000) / 100;
+  if (annualNetIncome && bs.totalAssets && bs.totalAssets > 0) {
+    fs.metrics.roa = Math.round((annualNetIncome / bs.totalAssets) * 10000) / 100;
   }
   
   // 営業利益率 = 営業利益 / 売上高
@@ -191,10 +288,20 @@ export function calculateMetrics(fs: FinancialStatements): void {
   if (fs.cashFlow.operatingCF !== null && fs.cashFlow.investingCF !== null) {
     fs.cashFlow.freeCashFlow = fs.cashFlow.operatingCF + fs.cashFlow.investingCF;
   }
+
+  // 成長率の計算（前期データがある場合）
+  const calcGrowth = (current: number | null, prior: number | null): number | null => {
+    if (current === null || prior === null || prior === 0) return null;
+    return Math.round(((current - prior) / Math.abs(prior)) * 10000) / 100;
+  };
+  fs.growth.revenueGrowth = calcGrowth(fs.incomeStatement.revenue, fs.priorPeriod.revenue);
+  fs.growth.operatingIncomeGrowth = calcGrowth(fs.incomeStatement.operatingIncome, fs.priorPeriod.operatingIncome);
+  fs.growth.netIncomeGrowth = calcGrowth(fs.incomeStatement.netIncome, fs.priorPeriod.netIncome);
+  fs.growth.epsGrowth = calcGrowth(fs.incomeStatement.eps, fs.priorPeriod.eps);
   
-  // 配当性向 = 年間配当 / EPS * 100
-  if (fs.dividend.annualDividendPerShare !== null && fs.incomeStatement.eps !== null && fs.incomeStatement.eps > 0) {
-    fs.dividend.payoutRatio = Math.round((fs.dividend.annualDividendPerShare / fs.incomeStatement.eps) * 10000) / 100;
+  // 配当性向 = 年間配当 / EPS * 100（年間配当は通期報告書のみ）
+  if (fs.periodType === "annual" && fs.dividend.annualDividendPerShare !== null && is.eps !== null && is.eps > 0) {
+    fs.dividend.payoutRatio = Math.round((fs.dividend.annualDividendPerShare / is.eps) * 10000) / 100;
   }
 }
 
@@ -223,8 +330,8 @@ export function generateSummary(fs: FinancialStatements): void {
   }
   
   if (fs.cashFlow.freeCashFlow !== null && fs.cashFlow.freeCashFlow > 0) {
-    const fcfBillions = Math.round(fs.cashFlow.freeCashFlow / 100000000) / 10;
-    highlights.push(`フリーCF ${fcfBillions}億円とキャッシュ創出力あり`);
+    const fcfOku = Math.round(fs.cashFlow.freeCashFlow / 10000000) / 10;
+    highlights.push(`フリーCF ${fcfOku}億円とキャッシュ創出力あり`);
   }
   
   // リスク分析
@@ -331,6 +438,24 @@ export function createEmptyFinancialStatements(): FinancialStatements {
       currentRatio: null,
       quickRatio: null,
     },
+    valuation: {
+      per: null,
+      pbr: null,
+      bps: null,
+      marketCap: null,
+    },
+    priorPeriod: {
+      revenue: null,
+      operatingIncome: null,
+      netIncome: null,
+      eps: null,
+    },
+    growth: {
+      revenueGrowth: null,
+      operatingIncomeGrowth: null,
+      netIncomeGrowth: null,
+      epsGrowth: null,
+    },
     dividend: {
       annualDividendPerShare: null,
       interimDividendPerShare: null,
@@ -339,6 +464,11 @@ export function createEmptyFinancialStatements(): FinancialStatements {
       payoutRatio: null,
       totalDividendPaid: null,
     },
+    periodType: "annual",
+    shares: { issued: null, treasury: null, outstanding: null },
+    priorFullYear: { revenue: null, operatingIncome: null, netIncome: null, eps: null },
+    trailing: { revenue: null, operatingIncome: null, netIncome: null, eps: null },
+    history: [],
     summary: {
       highlights: [],
       risks: [],

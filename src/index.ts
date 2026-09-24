@@ -23,10 +23,10 @@ import { generateInvestmentRecommendation, InvestmentRecommendation } from "./an
 import { scanDailyRevisions, EarningsRevision } from "./analysis/earnings-revision.js";
 import { scanDailyLargeShareholderReports, LargeShareholderReport } from "./analysis/large-shareholder.js";
 import { scanDailyMaterialEvents, MaterialEvent } from "./analysis/material-events.js";
-import { generateMockTrendAnalysis, TrendAnalysis } from "./analysis/trend-analysis.js";
+import { buildTrendAnalysis, TrendAnalysis } from "./analysis/trend-analysis.js";
 import { detectAnomalies, AnomalyReport } from "./analysis/anomaly-detection.js";
 import { resolveToBusinessDay } from "./utils/business-day.js";
-import { getStockQuote, formatStockQuote, StockQuote } from "./api/stock-price.js";
+import { getLatestQuote, getStockInfo } from "./api/jquants.js";
 import { getEPSHistory, EPSAnalysis } from "./analysis/eps-history.js";
 import { calculateNetCash, formatNetCashAnalysis } from "./analysis/net-cash.js";
 import { analyzeDhandho, formatDhandhoAnalysis } from "./analysis/dhandho.js";
@@ -284,7 +284,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_stock_info",
-        description: "【リアルタイム株価】企業の現在株価・時価総額・PER・PBR・配当利回り・EPS等を取得します。Yahoo Finance APIから最新データを取得。清原式ネットキャッシュ分析やバリュエーション分析に必要な時価総額データも提供します。",
+        description: "【リアルタイム株価】J-Quants API（JPX公式）から当日株価を取得し、EDINETの財務データと組み合わせてPER・PBR・時価総額を算出します。",
         inputSchema: {
           type: "object",
           properties: {
@@ -410,7 +410,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-name: "analyze_dhandho",
+        name: "analyze_dhandho",
         description: "【ダンドー分析】モニッシュ・パブライのダンドー投資法に基づく「大きく勝ち、小さく負ける」賭けの評価。上昇余地（PER水準×EPS成長）、下値限定（PBR・NC比率・配当）、確率（ROE・FCF・負債水準）の3軸でスコアリング。清原式ネットキャッシュ分析も内部で自動実行。",
         inputSchema: {
           type: "object",
@@ -721,12 +721,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ? `${latestDoc.periodStart} - ${latestDoc.periodEnd}` 
               : "";
             
+            // J-Quants APIでリアルタイム株価を取得し、PER/PBR/時価総額を算出
+            try {
+              const quote = await getLatestQuote(latestDoc.secCode || secCode || "");
+              if (quote) {
+                // 半期・四半期は累計EPSでPERを出すと過大になるためTTM EPSを使う
+                const eps = parsedFs.trailing.eps;
+                const bps = parsedFs.valuation.bps;
+                // リアルタイムPER/PBR（EDINET報告値より優先）
+                parsedFs.valuation.per = eps && eps > 0 ? Math.round((quote.price / eps) * 100) / 100 : null;
+                if (bps && bps > 0) {
+                  parsedFs.valuation.pbr = Math.round((quote.price / bps) * 100) / 100;
+                }
+                if (parsedFs.shares.outstanding) {
+                  parsedFs.valuation.marketCap = quote.price * parsedFs.shares.outstanding;
+                }
+              }
+            } catch (quoteError) {
+              console.error("J-Quants quote error:", quoteError);
+            }
+
             financialData = formatFinancialOutput(parsedFs);
           }
         } catch (parseError) {
           console.error("XBRL parse error:", parseError);
         }
-        
+
         // AI消費最適化: detailレベルに応じた出力
         let outputData: object;
         const fullData = financialData as any;
@@ -759,6 +779,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             company: fullData?.company || { name: latestDoc.filerName, secCode: latestDoc.secCode },
             judgmentSummary: fullData?.judgmentSummary || null,
             signalMetrics: fullData?.signalMetrics || null,
+            valuation: fullData?.valuation || null,
+            growth: fullData?.growth || null,
             accountingInfo: fullData?.accountingInfo || null,
             incomeStatement: fullData?.incomeStatement || null,
             metrics: fullData?.metrics || null,
@@ -1071,34 +1093,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-
       case "analyze_dhandho": {
         const { secCode } = args as { secCode: string };
-        
-        // 1. 財務データ取得（analyze_net_cashと同じロジック）
-        let documents: any[] = [];
-        const searchPeriods = [30, 90, 180, 365];
-        
-        for (const days of searchPeriods) {
-          if (documents.length > 0) break;
-          const endDate = new Date().toISOString().split("T")[0];
-          const startDate = (() => {
-            const d = new Date();
-            d.setDate(d.getDate() - days);
-            return d.toISOString().split("T")[0];
-          })();
-          documents = await client.searchBySecCode(secCode, startDate, endDate);
-          const reportDocs = documents.filter(
-            (doc: any) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
-          );
-          if (reportDocs.length > 0) break;
-        }
 
-        const reportDocs = documents.filter(
-          (doc: any) => (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") && doc.xbrlFlag === "1"
-        );
-
-        if (reportDocs.length === 0) {
+        const [latestDoc] = await client.findLatestFilings(secCode, ["120", "140", "160"], 400);
+        if (!latestDoc) {
           return {
             content: [{
               type: "text",
@@ -1111,22 +1110,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         try {
-          const xbrlZip = await client.getDocument(reportDocs[0].docID, "1");
+          const xbrlZip = await client.getDocument(latestDoc.docID, "1");
           const parsedFs = await parseXbrlFromZip(xbrlZip);
-          parsedFs.companyName = parsedFs.companyName || reportDocs[0].filerName;
-          parsedFs.secCode = parsedFs.secCode || reportDocs[0].secCode;
-          
-          // 2. NC分析
+          parsedFs.companyName = parsedFs.companyName || latestDoc.filerName;
+          parsedFs.secCode = parsedFs.secCode || latestDoc.secCode;
+
+          // NC分析
           const ncAnalysis = await calculateNetCash(parsedFs, secCode);
-          
-          // 3. 株価取得
-          const { getStockQuote } = await import("./api/stock-price.js");
-          const quote = await getStockQuote(secCode);
-          
-          // 4. ダンドー分析
+
+          // 株価（J-Quants）。PERは半期・四半期でもTTM EPSベース
+          const quote = await getStockInfo(secCode, {
+            eps: parsedFs.trailing.eps,
+            bps: parsedFs.valuation.bps,
+            sharesOutstanding: parsedFs.shares.outstanding,
+          });
+          if (quote && parsedFs.dividend.annualDividendPerShare) {
+            quote.dividendYield = Math.round((parsedFs.dividend.annualDividendPerShare / quote.price) * 10000) / 100;
+          }
+
           const dhandho = await analyzeDhandho(parsedFs, ncAnalysis, quote);
           const formatted = formatDhandhoAnalysis(dhandho);
-          
+
           return {
             content: [{
               type: "text",
@@ -1149,6 +1153,115 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
       }
+
+      case "get_stock_info": {
+        const { secCode } = args as { secCode: string };
+
+        try {
+          // まずEDINETから最新の財務データ（EPS/BPS）を取得
+          let eps: number | null = null;
+          let bps: number | null = null;
+          let sharesOutstanding: number | null = null;
+          let companyName: string | null = null;
+          let dividendYield: number | null = null;
+
+          let epsBasis: string | null = null;
+
+          const [latestDoc] = await client.findLatestFilings(secCode, ["120", "140", "160"], 400);
+          if (latestDoc) {
+            const xbrlZip = await client.getDocument(latestDoc.docID, "1");
+            const parsedFs = await parseXbrlFromZip(xbrlZip);
+            // 半期・四半期はTTM EPS（前期通期 − 前年同期累計 + 当期累計）
+            eps = parsedFs.trailing.eps;
+            epsBasis = parsedFs.periodType === "annual"
+              ? `実績（${latestDoc.docDescription}）`
+              : `TTM（${latestDoc.docDescription}から算出）`;
+            bps = parsedFs.valuation.bps;
+            companyName = parsedFs.companyName || latestDoc.filerName;
+            // 発行済株式数（提出日時点）− 自己株式。取れなければ純資産÷BPSで推定
+            sharesOutstanding = parsedFs.shares.outstanding;
+            const netAssets = parsedFs.balanceSheet.netAssets || parsedFs.balanceSheet.shareholdersEquity;
+            if (!sharesOutstanding && bps && bps > 0 && netAssets) {
+              sharesOutstanding = Math.round(netAssets / bps);
+            }
+            // 配当利回り（年間配当は有報のみ）
+            if (parsedFs.dividend.annualDividendPerShare) {
+              const quote = await getLatestQuote(secCode);
+              if (quote) {
+                dividendYield = Math.round((parsedFs.dividend.annualDividendPerShare / quote.price) * 10000) / 100;
+              }
+            }
+          }
+
+          const stockInfo = await getStockInfo(secCode, { eps, bps, sharesOutstanding });
+
+          if (!stockInfo) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "Stock not found",
+                  message: "株価データを取得できませんでした。証券コードを確認してください。",
+                  query: { secCode },
+                }, null, 2),
+              }],
+            };
+          }
+
+          const toOku = (val: number | null): string | null => {
+            if (val === null) return null;
+            return `${(val / 100000000).toFixed(0)}億円`;
+          };
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                company: companyName || secCode,
+                stockInfo: {
+                  code: stockInfo.code,
+                  date: stockInfo.date,
+                  price: `¥${stockInfo.price.toLocaleString()}`,
+                  open: stockInfo.open ? `¥${stockInfo.open.toLocaleString()}` : null,
+                  high: stockInfo.high ? `¥${stockInfo.high.toLocaleString()}` : null,
+                  low: stockInfo.low ? `¥${stockInfo.low.toLocaleString()}` : null,
+                  volume: stockInfo.volume ? `${(stockInfo.volume / 1000).toFixed(0)}千株` : null,
+                  marketCap: toOku(stockInfo.marketCap),
+                  per: stockInfo.per ? `${stockInfo.per.toFixed(1)}倍` : null,
+                  pbr: stockInfo.pbr ? `${stockInfo.pbr.toFixed(2)}倍` : null,
+                  eps: stockInfo.eps ? `¥${stockInfo.eps.toFixed(1)}` : null,
+                  bps: stockInfo.bps ? `¥${stockInfo.bps.toFixed(1)}` : null,
+                  dividendYield: dividendYield ? `${dividendYield.toFixed(2)}%` : null,
+                },
+                rawData: {
+                  price: stockInfo.price,
+                  marketCap: stockInfo.marketCap,
+                  per: stockInfo.per,
+                  pbr: stockInfo.pbr,
+                  eps: stockInfo.eps,
+                  bps: stockInfo.bps,
+                  sharesOutstanding: stockInfo.sharesOutstanding,
+                },
+                epsBasis,
+                source: "J-Quants API（JPX公式） + EDINET",
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Failed to get stock info",
+                message: error instanceof Error ? error.message : String(error),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+      }
+
       case "get_eps_history": {
         const { secCode } = args as { secCode: string };
         
@@ -1194,6 +1307,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   isGrowing: analysis.isGrowing,
                   assessment: analysis.growthAssessment,
                 },
+                splitWarnings: analysis.splitWarnings,
+                note: "有価証券報告書「主要な経営指標等の推移」の開示値。株式分割があった期より前は未修正の場合あり",
                 maxEPS: analysis.maxEPS ? {
                   value: "¥" + analysis.maxEPS.value.toFixed(1),
                   year: analysis.maxEPS.year,
@@ -1215,55 +1330,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case "get_stock_info": {
-        const { secCode } = args as { secCode: string };
-        
-        try {
-          const quote = await getStockQuote(secCode);
-          
-          if (!quote) {
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  error: "Stock not found",
-                  message: "株価データを取得できませんでした。証券コードを確認してください。",
-                  query: { secCode },
-                }, null, 2),
-              }],
-            };
-          }
-          
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                status: "success",
-                stockInfo: formatStockQuote(quote),
-                rawData: {
-                  marketCap: quote.marketCap,
-                  per: quote.per,
-                  pbr: quote.pbr,
-                  eps: quote.eps,
-                  sharesOutstanding: quote.sharesOutstanding,
-                  price: quote.price,
-                },
-              }, null, 2),
-            }],
-          };
-        } catch (error) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                error: "Failed to get stock info",
-                message: error instanceof Error ? error.message : String(error),
-              }, null, 2),
-            }],
-            isError: true,
-          };
-        }
-      }
 
       case "detect_earnings_revisions": {
         const { date } = args as { date?: string };
@@ -1472,40 +1538,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // 最新の財務データを取得
-        const endDate = new Date().toISOString().split("T")[0];
-        const startDate = (() => {
-          const d = new Date();
-          d.setDate(d.getDate() - 180);
-          return d.toISOString().split("T")[0];
-        })();
-
-        let documents: Document[] = [];
-        
+        // 5期推移は有価証券報告書にのみ載るため、最新の有報を探す
+        let reportDocs: Document[] = [];
         if (secCode) {
-          documents = await client.searchBySecCode(secCode, startDate, endDate);
+          reportDocs = await client.findLatestFilings(secCode, ["120"], 400);
         } else if (companyName) {
-          const d = new Date(endDate);
-          for (let i = 0; i < 60 && documents.length < 10; i++) {
+          const d = new Date();
+          for (let i = 0; i < 400 && reportDocs.length === 0; i++) {
             const dateStr = d.toISOString().split("T")[0];
             try {
               const response = await client.getDocumentList({ date: dateStr, type: "2" });
-              const filtered = response.results.filter(
-                (doc) => doc.filerName.includes(companyName!)
+              reportDocs = response.results.filter(
+                (doc) => doc.filerName?.includes(companyName!) && doc.docTypeCode === "120" && doc.xbrlFlag === "1"
               );
-              documents.push(...filtered);
             } catch (error) {
               // Skip
             }
             d.setDate(d.getDate() - 1);
           }
         }
-
-        const reportDocs = documents.filter(
-          (doc) => 
-            (doc.docTypeCode === "120" || doc.docTypeCode === "140") &&
-            doc.xbrlFlag === "1"
-        );
 
         if (reportDocs.length === 0) {
           return {
@@ -1514,8 +1565,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 type: "text",
                 text: JSON.stringify({
                   error: "No reports found",
-                  message: "財務報告書が見つかりません。",
-                  tokenSaved: "~500,000 tokens",
+                  message: "直近400日以内の有価証券報告書が見つかりません。",
                 }, null, 2),
               },
             ],
@@ -1523,22 +1573,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const latestDoc = reportDocs[0];
-        
-        // XBRLをパースして現在の財務データを取得
+
         let trendAnalysis: TrendAnalysis | null = null;
         try {
           const xbrlZip = await client.getDocument(latestDoc.docID, "1");
           const fs = await parseXbrlFromZip(xbrlZip);
-          
-          trendAnalysis = generateMockTrendAnalysis(
-            latestDoc.filerName,
-            latestDoc.secCode,
-            fs.incomeStatement.revenue,
-            fs.incomeStatement.operatingIncome,
-            fs.incomeStatement.netIncome,
-            fs.balanceSheet.totalAssets,
-            fs.metrics.roe
-          );
+          if (fs.history.length >= 2) {
+            trendAnalysis = buildTrendAnalysis(
+              fs.companyName || latestDoc.filerName,
+              latestDoc.secCode,
+              fs.history
+            );
+          }
         } catch (error) {
           console.error("Trend analysis error:", error);
         }
@@ -1873,14 +1919,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             company: r.company,
             secCode: r.secCode,
             totalScore: r.totalScore,
-            price: r.price ? `¥${r.price.toLocaleString()}` : null,
-            marketCap: r.marketCapOku ? `${r.marketCapOku}億円` : null,
             scores: {
               epsGrowth: r.epsScore,
               perCatalyst: r.perCatalystScore,
               netCash: r.netCashScore,
             },
             eps: {
+              current: r.eps ? `¥${r.eps.toFixed(1)}` : null,
               cagr: r.epsDetail.epsCAGR,
               consecutiveYears: r.epsDetail.consecutiveGrowthYears,
               assessment: r.epsDetail.growthAssessment,
@@ -1888,8 +1933,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             valuation: {
               per: r.per ? `${r.per.toFixed(1)}倍` : null,
               pbr: r.pbr ? `${r.pbr.toFixed(2)}倍` : null,
-              dividendYield: r.dividendYield ? `${r.dividendYield.toFixed(1)}%` : null,
+              bps: r.bps ? `¥${r.bps.toFixed(1)}` : null,
               catalysts: r.perCatalystDetail.catalysts,
+              source: "EDINET報告値",
             },
             netCash: {
               amount: r.netCashDetail.netCashOku,

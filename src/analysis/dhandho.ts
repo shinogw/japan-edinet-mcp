@@ -11,7 +11,7 @@
  */
 
 import { FinancialStatements } from "../parsers/xbrl.js";
-import { getStockQuote, StockQuote } from "../api/stock-price.js";
+import type { StockInfo as StockQuote } from "../api/jquants.js";
 import { NetCashAnalysis, calculateNetCash } from "./net-cash.js";
 
 export interface DhandhoAnalysis {
@@ -154,7 +154,7 @@ function evaluateUpside(fs: FinancialStatements, quote: StockQuote | null): Dhan
   let score = 0;
   const catalysts: string[] = [];
   const per = quote?.per ?? null;
-  const eps = fs.incomeStatement.eps ?? quote?.eps ?? null;
+  const eps = fs.trailing.eps ?? quote?.eps ?? null;
   const epsGrowth = fs.metrics.roe !== null && fs.metrics.roe > 0 ? fs.metrics.roe : null; // ROE as proxy
   
   // PERが低い = PE rerating余地

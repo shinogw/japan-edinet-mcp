@@ -2,15 +2,15 @@
  * 統合スクリーニング
  * 3つの視点で銘柄を一括評価:
  *   1. EPS成長性
- *   2. PER割安 + カタリスト期待
+ *   2. PER割安 + カタリスト期待（EDINETバリュエーション）
  *   3. 清原式ネットキャッシュ
  */
 
-import { getStockQuote, StockQuote } from "../api/stock-price.js";
 import { getEPSHistory, EPSAnalysis } from "./eps-history.js";
 import { calculateNetCash, NetCashAnalysis } from "./net-cash.js";
 import { getEdinetClient } from "../api/edinet.js";
 import { parseXbrlFromZip } from "../parsers/xbrl-parser.js";
+import { FinancialStatements } from "../parsers/xbrl.js";
 import { resolveToBusinessDay } from "../utils/business-day.js";
 
 export interface ScreeningCriteria {
@@ -29,11 +29,10 @@ export interface ScreeningCriteria {
 export interface ScreeningResult {
   secCode: string;
   company: string;
-  price: number | null;
-  marketCapOku: number | null;
   per: number | null;
   pbr: number | null;
-  dividendYield: number | null;
+  eps: number | null;
+  bps: number | null;
   epsScore: number;
   epsDetail: {
     currentEPS: number | null;
@@ -45,7 +44,6 @@ export interface ScreeningResult {
   perCatalystDetail: {
     per: number | null;
     pbr: number | null;
-    dividendYield: number | null;
     catalysts: string[];
   };
   netCashScore: number;
@@ -103,68 +101,77 @@ function scoreEPSGrowth(eps: EPSAnalysis | null): { score: number; detail: Scree
   };
 }
 
-function scorePERCatalyst(quote: StockQuote | null): { score: number; detail: ScreeningResult["perCatalystDetail"] } {
-  if (!quote) {
+/** EDINETのバリュエーション指標からPER/PBR割安度を評価 */
+function scorePERCatalyst(fs: FinancialStatements | null): { score: number; detail: ScreeningResult["perCatalystDetail"] } {
+  if (!fs) {
     return {
       score: 0,
-      detail: { per: null, pbr: null, dividendYield: null, catalysts: [] },
+      detail: { per: null, pbr: null, catalysts: [] },
     };
   }
+
+  const per = fs.valuation.per;
+  const pbr = fs.valuation.pbr;
   let score = 30;
   const catalysts: string[] = [];
-  if (quote.per !== null) {
-    if (quote.per > 0 && quote.per <= 8) {
-      score += 25; catalysts.push(`PER ${quote.per.toFixed(1)}倍 — 超割安`);
-    } else if (quote.per > 0 && quote.per <= 12) {
-      score += 20; catalysts.push(`PER ${quote.per.toFixed(1)}倍 — 割安`);
-    } else if (quote.per > 0 && quote.per <= 15) {
+
+  if (per !== null) {
+    if (per > 0 && per <= 8) {
+      score += 25; catalysts.push(`PER ${per.toFixed(1)}倍 — 超割安`);
+    } else if (per > 0 && per <= 12) {
+      score += 20; catalysts.push(`PER ${per.toFixed(1)}倍 — 割安`);
+    } else if (per > 0 && per <= 15) {
       score += 10;
-    } else if (quote.per > 25) {
+    } else if (per > 25) {
       score -= 10;
     }
   }
-  if (quote.pbr !== null) {
-    if (quote.pbr < 0.5) {
-      score += 15; catalysts.push(`PBR ${quote.pbr.toFixed(2)}倍 — 解散価値以下`);
-    } else if (quote.pbr < 1.0) {
-      score += 10; catalysts.push(`PBR ${quote.pbr.toFixed(2)}倍 — 1倍割れ`);
+  if (pbr !== null) {
+    if (pbr < 0.5) {
+      score += 15; catalysts.push(`PBR ${pbr.toFixed(2)}倍 — 解散価値以下`);
+    } else if (pbr < 1.0) {
+      score += 10; catalysts.push(`PBR ${pbr.toFixed(2)}倍 — 1倍割れ`);
     }
   }
-  if (quote.dividendYield !== null) {
-    if (quote.dividendYield >= 4.0) {
-      score += 15; catalysts.push(`配当利回り ${quote.dividendYield.toFixed(1)}% — 高配当`);
-    } else if (quote.dividendYield >= 3.0) {
-      score += 10; catalysts.push(`配当利回り ${quote.dividendYield.toFixed(1)}%`);
-    }
-  }
-  if (quote.pbr !== null && quote.pbr < 1.0) {
+  if (pbr !== null && pbr < 1.0) {
     catalysts.push("東証PBR1倍割れ是正の対象候補");
   }
   return {
     score: Math.max(0, Math.min(100, score)),
-    detail: { per: quote.per, pbr: quote.pbr, dividendYield: quote.dividendYield, catalysts },
+    detail: { per, pbr, catalysts },
   };
 }
 
 function scoreNetCash(nc: NetCashAnalysis | null): { score: number; detail: ScreeningResult["netCashDetail"] } {
-  if (!nc || nc.kiyohara.netCashRatio === null) {
+  if (!nc || nc.kiyohara.netCash === null) {
     return { score: 0, detail: { netCashOku: null, netCashRatio: null, verdict: "データなし" } };
   }
   let score = 30;
-  const ratio = nc.kiyohara.netCashRatio;
-  if (ratio >= 100) score += 60;
-  else if (ratio >= 50) score += 45;
-  else if (ratio >= 30) score += 30;
-  else if (ratio >= 15) score += 15;
-  else if (ratio >= 0) score += 5;
-  else score -= 10;
+  // NC比率が取れない場合は絶対額で評価
+  if (nc.kiyohara.netCashRatio !== null) {
+    const ratio = nc.kiyohara.netCashRatio;
+    if (ratio >= 100) score += 60;
+    else if (ratio >= 50) score += 45;
+    else if (ratio >= 30) score += 30;
+    else if (ratio >= 15) score += 15;
+    else if (ratio >= 0) score += 5;
+    else score -= 10;
+  } else {
+    // 絶対額のみ（NC > 0 ならプラス評価）
+    if (nc.kiyohara.netCash > 0) score += 20;
+    else score -= 10;
+  }
   const toOku = (val: number | null): string | null => {
     if (val === null) return null;
     return `${(val / 100000000).toFixed(1)}億円`;
   };
   return {
     score: Math.max(0, Math.min(100, score)),
-    detail: { netCashOku: toOku(nc.kiyohara.netCash), netCashRatio: ratio, verdict: nc.kiyohara.verdict },
+    detail: {
+      netCashOku: toOku(nc.kiyohara.netCash),
+      netCashRatio: nc.kiyohara.netCashRatio,
+      verdict: nc.kiyohara.verdict,
+    },
   };
 }
 
@@ -227,26 +234,16 @@ export async function runScreening(criteria: ScreeningCriteria): Promise<Screeni
 
   const results: ScreeningResult[] = [];
   const batchSize = 5;
-  
+
   for (let i = 0; i < secCodes.length; i += batchSize) {
     const batch = secCodes.slice(i, i + batchSize);
     const batchResults = await Promise.allSettled(
       batch.map(async (secCode) => {
         const stockErrors: string[] = [];
-        
-        let quote: StockQuote | null = null;
-        try { quote = await getStockQuote(secCode); } catch (e) { stockErrors.push(`株価取得失敗`); }
-        
-        if (quote?.marketCap) {
-          const mcOku = quote.marketCap / 100000000;
-          if (criteria.maxMarketCapOku && mcOku > criteria.maxMarketCapOku) return null;
-          if (criteria.minMarketCapOku && mcOku < criteria.minMarketCapOku) return null;
-        }
-        
-        let epsAnalysis: EPSAnalysis | null = null;
-        try { epsAnalysis = await getEPSHistory(secCode); } catch (e) { stockErrors.push(`EPS取得失敗`); }
-        
-        let netCashAnalysis: NetCashAnalysis | null = null;
+
+        // EDINET財務データ取得
+        let parsedFs: FinancialStatements | null = null;
+        let companyName = secCode;
         try {
           const client = getEdinetClient();
           let docs: any[] = [];
@@ -259,26 +256,37 @@ export async function runScreening(criteria: ScreeningCriteria): Promise<Screeni
             if (reportDocs.length > 0) { docs = reportDocs; break; }
           }
           if (docs.length > 0) {
+            companyName = docs[0].filerName || secCode;
             const xbrlZip = await client.getDocument(docs[0].docID, "1");
-            const parsedFs = await parseXbrlFromZip(xbrlZip);
+            parsedFs = await parseXbrlFromZip(xbrlZip);
             parsedFs.companyName = parsedFs.companyName || docs[0].filerName;
             parsedFs.secCode = parsedFs.secCode || docs[0].secCode;
-            netCashAnalysis = await calculateNetCash(parsedFs, secCode);
           }
-        } catch (e) { stockErrors.push(`ネットキャッシュ分析失敗`); }
-        
+        } catch (e) { stockErrors.push(`EDINET取得失敗`); }
+
+        // EPS分析
+        let epsAnalysis: EPSAnalysis | null = null;
+        try { epsAnalysis = await getEPSHistory(secCode); } catch (e) { stockErrors.push(`EPS取得失敗`); }
+
+        // ネットキャッシュ分析
+        let netCashAnalysis: NetCashAnalysis | null = null;
+        if (parsedFs) {
+          try { netCashAnalysis = await calculateNetCash(parsedFs, secCode); } catch (e) { stockErrors.push(`ネットキャッシュ分析失敗`); }
+        }
+
         const eps = scoreEPSGrowth(epsAnalysis);
-        const perCat = scorePERCatalyst(quote);
+        const perCat = scorePERCatalyst(parsedFs);
         const nc = scoreNetCash(netCashAnalysis);
         const totalScore = Math.round(eps.score * weights.epsGrowth + perCat.score * weights.perCatalyst + nc.score * weights.netCash);
         const { grade, gradeLabel } = determineGrade(eps.score, perCat.score, nc.score);
-        const company = quote?.name || epsAnalysis?.company || netCashAnalysis?.company || secCode;
-        
+        const company = parsedFs?.companyName || epsAnalysis?.company || companyName;
+
         const result: ScreeningResult = {
           secCode, company,
-          price: quote?.price || null,
-          marketCapOku: quote?.marketCap ? Math.round(quote.marketCap / 100000000) : null,
-          per: quote?.per || null, pbr: quote?.pbr || null, dividendYield: quote?.dividendYield || null,
+          per: parsedFs?.valuation.per || null,
+          pbr: parsedFs?.valuation.pbr || null,
+          eps: parsedFs?.trailing.eps || null,
+          bps: parsedFs?.valuation.bps || null,
           epsScore: eps.score, epsDetail: eps.detail,
           perCatalystScore: perCat.score, perCatalystDetail: perCat.detail,
           netCashScore: nc.score, netCashDetail: nc.detail,
@@ -288,15 +296,15 @@ export async function runScreening(criteria: ScreeningCriteria): Promise<Screeni
         return result;
       })
     );
-    
+
     for (const r of batchResults) {
       if (r.status === "fulfilled" && r.value) results.push(r.value);
       else if (r.status === "rejected") errors.push(String(r.reason));
     }
   }
-  
+
   results.sort((a, b) => b.totalScore - a.totalScore);
-  
+
   return {
     criteria: { universe: universeLabel, marketCapFilter, weights },
     scanned: secCodes.length,

@@ -12,6 +12,8 @@
  * このMCPなら: 1 API呼び出し
  */
 
+import type { HistoryEntry } from "../parsers/xbrl.js";
+
 export interface TrendMetric {
   metric: string;
   values: Array<{
@@ -31,8 +33,9 @@ export interface TrendAnalysis {
   
   // 主要指標のトレンド
   revenue: TrendMetric;
-  operatingIncome: TrendMetric;
+  ordinaryIncome: TrendMetric; // 営業利益は推移表に無いため経常利益（IFRSは税引前利益）
   netIncome: TrendMetric;
+  eps: TrendMetric;
   totalAssets: TrendMetric;
   roe: TrendMetric;
   
@@ -75,8 +78,11 @@ function determineTrend(values: Array<{ value: number | null; yoyChange: number 
   const negativeCount = validChanges.filter((c) => c < 0).length;
   
   // 変動が大きい場合
+  // 大きな振れ（50%超）があり、かつ10%超の逆方向の動きもある場合のみ
   const maxChange = Math.max(...validChanges.map(Math.abs));
-  if (maxChange > 50 && positiveCount > 0 && negativeCount > 0) {
+  const bigUp = validChanges.some((c) => c > 10);
+  const bigDown = validChanges.some((c) => c < -10);
+  if (maxChange > 50 && bigUp && bigDown) {
     return "VOLATILE";
   }
   
@@ -118,133 +124,148 @@ function generateTrendSummary(metric: string, trend: TrendMetric["trend"], cagr:
 }
 
 /**
- * モック: 時系列データを生成（実際はEDINETから取得）
- * 将来的には過去の有価証券報告書から実データを取得
+ * 有価証券報告書「主要な経営指標等の推移」（最大5期）から時系列トレンドを分析
  */
-export function generateMockTrendAnalysis(
+export function buildTrendAnalysis(
   companyName: string,
   secCode: string | null,
-  currentRevenue: number | null,
-  currentOperatingIncome: number | null,
-  currentNetIncome: number | null,
-  currentAssets: number | null,
-  currentRoe: number | null
+  history: HistoryEntry[]
 ): TrendAnalysis {
-  
-  // モックで過去5年分のデータを生成（実際は過去のXBRLから取得）
-  const years = ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025"];
-  
-  // 売上高トレンド（仮にランダム変動を追加）
-  const revenueValues = years.map((year, i) => {
-    const baseValue = currentRevenue ? currentRevenue * (0.8 + i * 0.05) : null;
-    const prevValue = i > 0 && currentRevenue ? currentRevenue * (0.8 + (i - 1) * 0.05) : null;
+  const label = (h: HistoryEntry, i: number) =>
+    h.periodEnd ? `FY${h.periodEnd.substring(0, 7)}` : `FY-${history.length - 1 - i}`;
+
+  const buildMetric = (
+    metric: string,
+    pickValue: (h: HistoryEntry) => number | null,
+    changeMode: "percent" | "points" = "percent"
+  ): TrendMetric => {
+    const values = history.map((h, i) => {
+      const value = pickValue(h);
+      const prev = i > 0 ? pickValue(history[i - 1]) : null;
+      let yoyChange: number | null = null;
+      if (value !== null && prev !== null) {
+        if (changeMode === "points") yoyChange = Math.round((value - prev) * 100) / 100;
+        else if (prev !== 0) yoyChange = Math.round(((value - prev) / Math.abs(prev)) * 10000) / 100;
+      }
+      return { period: label(h, i), value, yoyChange };
+    });
+
+    const valid = values.filter((v) => v.value !== null);
+    const cagr = changeMode === "percent" && valid.length >= 2
+      ? calculateCAGR(valid[0].value!, valid[valid.length - 1].value!, valid.length - 1)
+      : null;
+    const roundedCagr = cagr !== null ? Math.round(cagr * 100) / 100 : null;
+
+    // ROE等（%ポイント差）は変化幅をそのまま率として判定するとブレるため、2pt以上の動きを変化とみなす
+    const trend = changeMode === "points"
+      ? determinePointTrend(valid.map((v) => v.value!))
+      : determineTrend(values);
+
     return {
-      period: year,
-      value: baseValue,
-      yoyChange: baseValue && prevValue ? ((baseValue - prevValue) / prevValue) * 100 : null,
+      metric,
+      values,
+      trend,
+      cagr: roundedCagr,
+      summary: generateTrendSummary(metric, trend, roundedCagr),
     };
-  });
-  
-  const revenueTrend = determineTrend(revenueValues);
-  const revenueCAGR = currentRevenue ? calculateCAGR(currentRevenue * 0.8, currentRevenue, 4) : null;
-  
-  const revenue: TrendMetric = {
-    metric: "売上高",
-    values: revenueValues,
-    trend: revenueTrend,
-    cagr: revenueCAGR,
-    summary: generateTrendSummary("売上高", revenueTrend, revenueCAGR),
   };
-  
-  // 他の指標も同様に（簡略化）
-  const operatingIncome: TrendMetric = {
-    metric: "営業利益",
-    values: [],
-    trend: currentOperatingIncome && currentOperatingIncome > 0 ? "GROWTH" : "DECLINE",
-    cagr: null,
-    summary: currentOperatingIncome && currentOperatingIncome > 0 
-      ? "営業利益は黒字基調" 
-      : "営業利益は赤字または減益傾向",
-  };
-  
-  const netIncome: TrendMetric = {
-    metric: "純利益",
-    values: [],
-    trend: currentNetIncome && currentNetIncome > 0 ? "GROWTH" : "DECLINE",
-    cagr: null,
-    summary: currentNetIncome && currentNetIncome > 0 
-      ? "純利益は黒字基調" 
-      : "純利益は赤字または減益傾向",
-  };
-  
-  const totalAssets: TrendMetric = {
-    metric: "総資産",
-    values: [],
-    trend: "STABLE",
-    cagr: null,
-    summary: "総資産は安定推移",
-  };
-  
-  const roe: TrendMetric = {
-    metric: "ROE",
-    values: [],
-    trend: currentRoe && currentRoe > 10 ? "GROWTH" : currentRoe && currentRoe > 0 ? "STABLE" : "DECLINE",
-    cagr: null,
-    summary: currentRoe 
-      ? `ROE ${currentRoe.toFixed(1)}%で${currentRoe > 10 ? "高収益" : currentRoe > 0 ? "安定" : "低収益"}` 
-      : "ROEデータなし",
-  };
-  
+
+  const revenue = buildMetric("売上高", (h) => h.revenue);
+  const ordinaryIncome = buildMetric("経常利益（IFRSは税引前利益）", (h) => h.ordinaryIncome);
+  const netIncome = buildMetric("純利益", (h) => h.netIncome);
+  const eps = buildMetric("EPS", (h) => h.eps);
+  const totalAssets = buildMetric("総資産", (h) => h.totalAssets);
+  const roe = buildMetric("ROE", (h) => h.roe, "points");
+
   // 総合評価
+  const core = [revenue, ordinaryIncome, netIncome];
+  const growthCount = core.filter((m) => m.trend === "GROWTH" || m.trend === "STRONG_GROWTH").length;
+  const declineCount = core.filter((m) => m.trend === "DECLINE" || m.trend === "STRONG_DECLINE").length;
+  const latestNet = netIncome.values[netIncome.values.length - 1]?.value ?? null;
+  const prevNet = netIncome.values[netIncome.values.length - 2]?.value ?? null;
+
   let overallTrend: TrendAnalysis["overallTrend"] = "STABLE";
-  const growthCount = [revenue, operatingIncome, netIncome].filter(
-    (m) => m.trend === "GROWTH" || m.trend === "STRONG_GROWTH"
-  ).length;
-  const declineCount = [revenue, operatingIncome, netIncome].filter(
-    (m) => m.trend === "DECLINE" || m.trend === "STRONG_DECLINE"
-  ).length;
-  
-  if (growthCount >= 2) overallTrend = "EXPANDING";
+  if (prevNet !== null && latestNet !== null && prevNet < 0 && latestNet > 0) overallTrend = "TURNAROUND";
+  else if (growthCount >= 2) overallTrend = "EXPANDING";
   else if (declineCount >= 2) overallTrend = "CONTRACTING";
-  else if (growthCount === 1 && declineCount === 1) overallTrend = "TURNAROUND";
-  
-  // サマリー生成
+  else if (declineCount >= 1 && growthCount === 0) overallTrend = "DETERIORATING";
+
   const keyFindings: string[] = [];
   const growthDrivers: string[] = [];
   const concerns: string[] = [];
-  
-  if (revenue.trend === "STRONG_GROWTH" || revenue.trend === "GROWTH") {
-    keyFindings.push(revenue.summary);
-    growthDrivers.push("売上拡大");
+
+  for (const m of [revenue, ordinaryIncome, netIncome, eps]) {
+    if (m.trend !== "INSUFFICIENT_DATA") keyFindings.push(m.summary);
   }
-  if (operatingIncome.trend === "DECLINE" || operatingIncome.trend === "STRONG_DECLINE") {
-    concerns.push("収益性の低下");
+  if (revenue.trend === "GROWTH" || revenue.trend === "STRONG_GROWTH") growthDrivers.push("売上拡大");
+  if (ordinaryIncome.cagr !== null && revenue.cagr !== null && ordinaryIncome.cagr > revenue.cagr + 3) {
+    growthDrivers.push("利益率の改善（利益成長が売上成長を上回る）");
   }
-  if (currentRoe && currentRoe > 15) {
-    growthDrivers.push(`高ROE（${currentRoe.toFixed(1)}%）`);
+  const latestRoe = roe.values[roe.values.length - 1]?.value ?? null;
+  if (latestRoe !== null && latestRoe >= 15) growthDrivers.push(`高ROE（${latestRoe.toFixed(1)}%）`);
+
+  if (netIncome.trend === "VOLATILE") concerns.push("純利益の変動が大きい（特別損益・減損等の確認を推奨）");
+  for (const m of core) {
+    if (m.trend === "DECLINE" || m.trend === "STRONG_DECLINE") concerns.push(m.summary);
   }
-  
+  if (roe.trend === "DECLINE") concerns.push("ROEが低下傾向");
+
+  // 株式数の急変（分割・併合）があると過去EPSは比較不能
+  for (let i = 1; i < history.length; i++) {
+    const a = history[i - 1].sharesIssued;
+    const b = history[i].sharesIssued;
+    if (a && b && (b / a > 1.3 || a / b > 1.3)) {
+      concerns.push(`${label(history[i], i)}に発行済株式数が大きく変化（株式分割・併合の可能性）。EPS推移は要注意`);
+    }
+  }
+
+  const first = history[0]?.periodEnd?.substring(0, 7) ?? "?";
+  const last = history[history.length - 1]?.periodEnd?.substring(0, 7) ?? "?";
+
   return {
     companyName,
     secCode,
-    analysisPeriod: "FY2021-FY2025（5年間）",
+    analysisPeriod: `${first}期〜${last}期（${history.length}期、有価証券報告書「主要な経営指標等の推移」）`,
     revenue,
-    operatingIncome,
+    ordinaryIncome,
     netIncome,
+    eps,
     totalAssets,
     roe,
     overallTrend,
     summary: {
-      headline: `${companyName}は${overallTrend === "EXPANDING" ? "成長拡大" : overallTrend === "CONTRACTING" ? "縮小傾向" : "安定推移"}`,
-      keyFindings: keyFindings.length > 0 ? keyFindings : ["データ分析中"],
+      headline: `${companyName}は${
+        overallTrend === "EXPANDING" ? "成長拡大" :
+        overallTrend === "CONTRACTING" ? "縮小傾向" :
+        overallTrend === "TURNAROUND" ? "黒字転換" :
+        overallTrend === "DETERIORATING" ? "悪化傾向" : "安定推移"
+      }`,
+      keyFindings: keyFindings.length > 0 ? keyFindings : ["データ不足"],
       growthDrivers: growthDrivers.length > 0 ? growthDrivers : ["特筆すべき成長ドライバーなし"],
       concerns: concerns.length > 0 ? concerns : ["顕著な懸念なし"],
-      outlook: overallTrend === "EXPANDING" 
-        ? "成長継続が期待される。投資妙味あり。"
-        : overallTrend === "CONTRACTING"
+      outlook: overallTrend === "EXPANDING"
+        ? "過去数期は成長基調。継続性は直近の四半期・会社予想で確認。"
+        : overallTrend === "CONTRACTING" || overallTrend === "DETERIORATING"
         ? "業績改善の兆候を待つべき。"
+        : overallTrend === "TURNAROUND"
+        ? "黒字転換局面。利益の持続性を確認。"
         : "安定した業績。バリュエーション次第。",
     },
     tokenSaved: "~500,000 tokens (vs fetching 5 years of XBRL manually)",
   };
+}
+
+/**
+ * %ポイントで動く指標（ROE等）のトレンド判定
+ */
+function determinePointTrend(values: number[]): TrendMetric["trend"] {
+  if (values.length < 2) return "INSUFFICIENT_DATA";
+  const diffs = values.slice(1).map((v, i) => v - values[i]);
+  const total = values[values.length - 1] - values[0];
+  const up = diffs.filter((d) => d > 0).length;
+  const down = diffs.filter((d) => d < 0).length;
+  if (Math.max(...diffs.map(Math.abs)) > 15 && up > 0 && down > 0) return "VOLATILE";
+  if (total >= 5) return "GROWTH";
+  if (total <= -5) return "DECLINE";
+  return "STABLE";
 }

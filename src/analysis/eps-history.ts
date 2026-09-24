@@ -1,11 +1,10 @@
 /**
  * EPS履歴分析
- * Yahoo Finance + EDINETからEPSの推移を分析
+ * EDINETの有価証券報告書からEPSの推移を分析
  */
 
-import YahooFinance from "yahoo-finance2";
-
-const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
+import { getEdinetClient } from "../api/edinet.js";
+import { parseXbrlFromZip } from "../parsers/xbrl-parser.js";
 
 export interface EPSHistoryEntry {
   fiscalYear: string;
@@ -25,41 +24,49 @@ export interface EPSAnalysis {
   maxEPS: { value: number; year: string } | null;
   isGrowing: boolean;
   growthAssessment: string;
-}
-
-function toYahooSymbol(secCode: string): string {
-  const code = secCode.replace(/0$/, "");
-  return `${code}.T`;
+  splitWarnings: string[];
 }
 
 /**
- * Yahoo FinanceからEPS履歴を取得・分析
+ * EDINETからEPS履歴を取得・分析
+ * 最新の有価証券報告書「主要な経営指標等の推移」（最大5期）から構築する
  */
 export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null> {
   try {
-    const symbol = toYahooSymbol(secCode);
-    
-    // 株価情報からEPS取得
-    const quote = await yf.quote(symbol) as any;
-    const currentEPS = quote?.epsTrailingTwelveMonths || null;
-    const sharesOutstanding = quote?.sharesOutstanding || null;
-    const companyName = quote?.shortName || quote?.longName || symbol;
-    
-    // 過去の損益計算書を取得
-    const summary = await yf.quoteSummary(symbol, { modules: ["incomeStatementHistory"] }) as any;
-    const statements = summary?.incomeStatementHistory?.incomeStatementHistory || [];
-    
-    // 履歴を構築
-    const history: EPSHistoryEntry[] = statements.map((stmt: any) => {
-      const date = new Date(stmt.endDate);
-      const year = date.getFullYear().toString();
-      const netIncome = stmt.netIncome || null;
-      const revenue = stmt.totalRevenue || null;
-      const eps = (netIncome && sharesOutstanding) ? netIncome / sharesOutstanding : null;
-      
-      return { fiscalYear: year, eps, netIncome, revenue };
-    }).reverse(); // 古い順に並べ替え
-    
+    const client = getEdinetClient();
+    const code = secCode.length === 4 ? secCode + "0" : secCode;
+
+    const [doc] = await client.findLatestFilings(code, ["120"], 400);
+    if (!doc) return null;
+
+    const xbrlZip = await client.getDocument(doc.docID, "1");
+    const parsedFs = await parseXbrlFromZip(xbrlZip);
+    const companyName = parsedFs.companyName || doc.filerName || code;
+
+    const history: EPSHistoryEntry[] = parsedFs.history.map((h) => ({
+      fiscalYear: h.periodEnd ? h.periodEnd.substring(0, 7) : "",
+      eps: h.eps,
+      netIncome: h.netIncome,
+      revenue: h.revenue,
+    }));
+
+    // 株式数が大きく変化した期（分割・併合）の前後はEPSが比較不能
+    const splitWarnings: string[] = [];
+    for (let i = 1; i < parsedFs.history.length; i++) {
+      const a = parsedFs.history[i - 1].sharesIssued;
+      const b = parsedFs.history[i].sharesIssued;
+      if (a && b && (b / a > 1.3 || a / b > 1.3)) {
+        splitWarnings.push(`${history[i].fiscalYear}期に発行済株式数が${(b / a).toFixed(2)}倍（株式分割・併合の可能性）`);
+      }
+    }
+
+    // 古い順にソート
+    history.sort((a, b) => a.fiscalYear.localeCompare(b.fiscalYear));
+
+    if (history.length === 0) {
+      return null;
+    }
+
     // EPS成長率を計算
     const epsGrowthRates: { year: string; rate: string }[] = [];
     for (let i = 1; i < history.length; i++) {
@@ -73,7 +80,7 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
         });
       }
     }
-    
+
     // CAGR計算
     let epsCAGR: string | null = null;
     if (history.length >= 2) {
@@ -85,7 +92,7 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
         epsCAGR = `${cagr > 0 ? "+" : ""}${cagr.toFixed(1)}%`;
       }
     }
-    
+
     // 連続増益年数
     let consecutiveGrowth = 0;
     for (let i = history.length - 1; i > 0; i--) {
@@ -97,7 +104,7 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
         break;
       }
     }
-    
+
     // 最高EPS
     let maxEPS: { value: number; year: string } | null = null;
     for (const entry of history) {
@@ -105,10 +112,10 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
         maxEPS = { value: entry.eps, year: entry.fiscalYear };
       }
     }
-    
+
     // 増益トレンド判定
     const isGrowing = consecutiveGrowth >= 2;
-    
+
     // 成長性評価
     let growthAssessment: string;
     if (consecutiveGrowth >= 3) {
@@ -122,7 +129,9 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
     } else {
       growthAssessment = "横ばい";
     }
-    
+
+    const currentEPS = history.length > 0 ? history[history.length - 1].eps : null;
+
     return {
       company: companyName,
       secCode,
@@ -134,6 +143,7 @@ export async function getEPSHistory(secCode: string): Promise<EPSAnalysis | null
       maxEPS,
       isGrowing,
       growthAssessment,
+      splitWarnings,
     };
   } catch (error) {
     console.error(`Failed to get EPS history for ${secCode}:`, error);

@@ -11,7 +11,7 @@
  */
 
 import { FinancialStatements } from "../parsers/xbrl.js";
-import { getStockQuote } from "../api/stock-price.js";
+import { getLatestQuote } from "../api/jquants.js";
 
 export interface NetCashAnalysis {
   company: string;
@@ -139,15 +139,23 @@ export async function calculateNetCash(
       - (totalInterestBearingDebt || 0);
   }
   
-  // 時価総額
+  // 時価総額（J-Quants APIから株価取得 → BPSベースで発行済株式数推定）
   let marketCapValue: number | null = null;
   let sharesOutstanding: number | null = null;
   const code = secCode || fs.secCode;
   if (code) {
-    const quote = await getStockQuote(code);
+    const quote = await getLatestQuote(code);
     if (quote) {
-      marketCapValue = quote.marketCap;
-      sharesOutstanding = quote.sharesOutstanding;
+      // 発行済株式数（EDINET開示、自己株式控除）。無ければ純資産 ÷ BPSで推定
+      sharesOutstanding = fs.shares.outstanding;
+      const bps = fs.valuation.bps;
+      const netAssets = fs.balanceSheet.netAssets || fs.balanceSheet.shareholdersEquity;
+      if (!sharesOutstanding && bps && bps > 0 && netAssets) {
+        sharesOutstanding = Math.round(netAssets / bps);
+      }
+      if (sharesOutstanding) {
+        marketCapValue = quote.price * sharesOutstanding;
+      }
     }
   }
   
@@ -209,8 +217,8 @@ export async function calculateNetCash(
     },
     marketCap: {
       value: marketCapValue,
-      source: "yahoo-finance2 (自己株式控除ベース = sharesOutstanding × 株価)",
-      note: "株探・四季報等は発行済株式数×株価のため、自己株式が多い銘柄では差異が生じます。",
+      source: "J-Quants API（株価） × EDINET（発行済株式数 − 自己株式）",
+      note: "株式数はEDINET開示値（提出日時点の発行済 − 期末自己株式）。未開示の場合は純資産÷BPSで推定。",
       sharesOutstanding,
     },
     enterpriseValue,

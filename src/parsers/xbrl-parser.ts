@@ -9,7 +9,8 @@ import {
   FinancialStatements, 
   createEmptyFinancialStatements,
   calculateMetrics,
-  generateSummary
+  generateSummary,
+  HistoryEntry,
 } from "./xbrl.js";
 
 const parser = new XMLParser({
@@ -203,6 +204,51 @@ const VALUE_EXTRACTORS: Record<string, { path: string; field: keyof any }[]> = {
   // 配当金支払（キャッシュフロー計算書から）
   "jppfs_cor:CashDividendsPaidFinCF": [{ path: "dividend", field: "totalDividendPaid" }],
   "jppfs_cor:DividendsPaidFinCF": [{ path: "dividend", field: "totalDividendPaid" }],
+
+  // ========== バリュエーション指標（主要な経営指標等の推移） ==========
+  // PER（株価収益率）
+  "jpcrp_cor:PriceEarningsRatioSummaryOfBusinessResults": [{ path: "valuation", field: "per" }],
+  "jpcrp_cor:PriceEarningsRatio": [{ path: "valuation", field: "per" }],
+
+  // PBR（株価純資産倍率）
+  "jpcrp_cor:PriceBookValueRatioSummaryOfBusinessResults": [{ path: "valuation", field: "pbr" }],
+  "jpcrp_cor:PriceBookValueRatio": [{ path: "valuation", field: "pbr" }],
+
+  // BPS（1株当たり純資産）
+  "jpcrp_cor:BookValuePerShareSummaryOfBusinessResults": [{ path: "valuation", field: "bps" }],
+  "jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults": [{ path: "valuation", field: "bps" }],
+  "jpcrp_cor:NetAssetsPerShare": [{ path: "valuation", field: "bps" }],
+  "jppfs_cor:NetAssetsPerShare": [{ path: "valuation", field: "bps" }],
+
+  // ========== IFRS（jpigp_cor名前空間。IFRS適用会社の本表はこちら） ==========
+  "jpigp_cor:RevenueIFRS": [{ path: "incomeStatement", field: "revenue" }],
+  "jpigp_cor:NetSalesIFRS": [{ path: "incomeStatement", field: "revenue" }],
+  "jpigp_cor:SalesRevenuesIFRS": [{ path: "incomeStatement", field: "revenue" }],
+  "jpigp_cor:GrossProfitIFRS": [{ path: "incomeStatement", field: "grossProfit" }],
+  "jpigp_cor:OperatingProfitLossIFRS": [{ path: "incomeStatement", field: "operatingIncome" }],
+  "jpigp_cor:ProfitLossBeforeTaxIFRS": [{ path: "incomeStatement", field: "ordinaryIncome" }],
+  "jpigp_cor:ProfitLossAttributableToOwnersOfParentIFRS": [{ path: "incomeStatement", field: "netIncome" }],
+  "jpigp_cor:BasicEarningsLossPerShareIFRS": [{ path: "incomeStatement", field: "eps" }],
+  "jpigp_cor:BasicAndDilutedEarningsLossPerShareIFRS": [{ path: "incomeStatement", field: "eps" }],
+  "jpigp_cor:CostOfSalesIFRS": [{ path: "incomeStatement", field: "costOfSales" }],
+  "jpigp_cor:AssetsIFRS": [{ path: "balanceSheet", field: "totalAssets" }],
+  "jpigp_cor:CurrentAssetsIFRS": [{ path: "balanceSheet", field: "currentAssets" }],
+  "jpigp_cor:CashAndCashEquivalentsIFRS": [{ path: "balanceSheet", field: "cashAndDeposits" }],
+  "jpigp_cor:InventoriesIFRS": [{ path: "balanceSheet", field: "inventories" }],
+  "jpigp_cor:PropertyPlantAndEquipmentIFRS": [{ path: "balanceSheet", field: "tangibleAssets" }],
+  "jpigp_cor:IntangibleAssetsIFRS": [{ path: "balanceSheet", field: "intangibleAssets" }],
+  "jpigp_cor:NonCurrentAssetsIFRS": [{ path: "balanceSheet", field: "nonCurrentAssets" }],
+  "jpigp_cor:LiabilitiesIFRS": [{ path: "balanceSheet", field: "totalLiabilities" }],
+  "jpigp_cor:CurrentLiabilitiesIFRS": [{ path: "balanceSheet", field: "currentLiabilities" }],
+  "jpigp_cor:NonCurrentLiabilitiesIFRS": [{ path: "balanceSheet", field: "nonCurrentLiabilities" }],
+  "jpigp_cor:EquityIFRS": [{ path: "balanceSheet", field: "netAssets" }],
+  "jpigp_cor:EquityAttributableToOwnersOfParentIFRS": [{ path: "balanceSheet", field: "shareholdersEquity" }],
+  "jpigp_cor:RetainedEarningsIFRS": [{ path: "balanceSheet", field: "retainedEarnings" }],
+  "jpigp_cor:NetCashProvidedByUsedInOperatingActivitiesIFRS": [{ path: "cashFlow", field: "operatingCF" }],
+  "jpigp_cor:NetCashProvidedByUsedInInvestingActivitiesIFRS": [{ path: "cashFlow", field: "investingCF" }],
+  "jpigp_cor:NetCashProvidedByUsedInFinancingActivitiesIFRS": [{ path: "cashFlow", field: "financingCF" }],
+  "jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults": [{ path: "incomeStatement", field: "eps" }],
+  "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareIFRSSummaryOfBusinessResults": [{ path: "valuation", field: "bps" }],
 };
 
 /**
@@ -229,6 +275,9 @@ export async function parseXbrlFromZip(zipBuffer: ArrayBuffer): Promise<Financia
       return fs;
     }
 
+    const facts = new Map<string, Fact[]>();
+    const contextEnds = new Map<string, string>();
+
     // メインのXBRLファイルを解析
     for (const xbrlPath of xbrlFiles) {
       const file = zip.file(xbrlPath);
@@ -241,25 +290,9 @@ export async function parseXbrlFromZip(zipBuffer: ArrayBuffer): Promise<Financia
       const root = parsed["xbrli:xbrl"] || parsed["xbrl"] || parsed;
       if (!root) continue;
 
-      // 各要素を解析
-      for (const [tagName, extractors] of Object.entries(VALUE_EXTRACTORS)) {
-        const shortTag = tagName.split(":")[1];
-        const value = root[tagName] || root[shortTag];
-        
-        if (value !== undefined) {
-          const numValue = extractNumericValue(value);
-          if (numValue !== null) {
-            for (const extractor of extractors) {
-              const pathKey = extractor.path as "balanceSheet" | "incomeStatement" | "cashFlow";
-              const target = fs[pathKey] as Record<string, number | null>;
-              const fieldKey = extractor.field as string;
-              if (target && target[fieldKey] === null) {
-                target[fieldKey] = numValue;
-              }
-            }
-          }
-        }
-      }
+      // 事実（値＋コンテキスト）を収集。解決は全ファイル読了後にまとめて行う
+      collectFacts(root, facts);
+      collectContextEnds(root, contextEnds);
 
       // 会社名を取得
       const companyName = extractTextValue(root, ["jpdei_cor:FilerNameInJapaneseDEI", "FilerNameInJapaneseDEI"]);
@@ -317,6 +350,8 @@ export async function parseXbrlFromZip(zipBuffer: ArrayBuffer): Promise<Financia
       }
     }
 
+    resolveFacts(fs, facts, contextEnds);
+
     // 指標を計算
     calculateMetrics(fs);
     
@@ -328,6 +363,246 @@ export async function parseXbrlFromZip(zipBuffer: ArrayBuffer): Promise<Financia
   }
 
   return fs;
+}
+
+// ========== コンテキスト解決 ==========
+
+interface Fact {
+  ctx: string;
+  value: number;
+}
+
+// 会社独自タグの売上（例: トヨタ OperatingRevenuesIFRSKeyFinancialData）をまとめる擬似タグ
+const CUSTOM_REVENUE_TAG = "__customRevenueSummary";
+const CUSTOM_REVENUE_RE = /^jpcrp\d+-\w+_E\d+-\d+:\w*(?:Revenues?|NetSales)\w*(?:SummaryOfBusinessResults|KeyFinancialData)$/;
+
+// 主要な経営指標等の推移（有報の5期分）
+const HISTORY_TAGS: Record<keyof Omit<HistoryEntry, "periodEnd">, string[]> = {
+  revenue: [
+    "jpcrp_cor:NetSalesSummaryOfBusinessResults",
+    "jpcrp_cor:RevenueIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:RevenuesUSGAAPSummaryOfBusinessResults",
+    "jpcrp_cor:OperatingRevenue1SummaryOfBusinessResults",
+    "jpcrp_cor:OperatingRevenue2SummaryOfBusinessResults",
+    "jpcrp_cor:NetSalesOfCompletedConstructionContractsSummaryOfBusinessResults",
+    CUSTOM_REVENUE_TAG,
+  ],
+  ordinaryIncome: [
+    "jpcrp_cor:OrdinaryIncomeLossSummaryOfBusinessResults",
+    "jpcrp_cor:ProfitLossBeforeTaxIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:ProfitLossBeforeTaxUSGAAPSummaryOfBusinessResults",
+  ],
+  netIncome: [
+    "jpcrp_cor:ProfitLossAttributableToOwnersOfParentSummaryOfBusinessResults",
+    "jpcrp_cor:ProfitLossAttributableToOwnersOfParentIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
+    "jpcrp_cor:NetIncomeLossSummaryOfBusinessResults",
+  ],
+  eps: [
+    "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults",
+    "jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:BasicEarningsLossPerShareUSGAAPSummaryOfBusinessResults",
+  ],
+  bps: [
+    "jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults",
+    "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareIFRSSummaryOfBusinessResults",
+  ],
+  roe: [
+    "jpcrp_cor:RateOfReturnOnEquitySummaryOfBusinessResults",
+    "jpcrp_cor:RateOfReturnOnEquityIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:RateOfReturnOnEquityUSGAAPSummaryOfBusinessResults",
+  ],
+  totalAssets: [
+    "jpcrp_cor:TotalAssetsSummaryOfBusinessResults",
+    "jpcrp_cor:TotalAssetsIFRSSummaryOfBusinessResults",
+    "jpcrp_cor:TotalAssetsUSGAAPSummaryOfBusinessResults",
+  ],
+  netAssets: [
+    "jpcrp_cor:NetAssetsSummaryOfBusinessResults",
+    "jpcrp_cor:EquityAttributableToOwnersOfParentIFRSSummaryOfBusinessResults",
+  ],
+  operatingCF: [
+    "jpcrp_cor:NetCashProvidedByUsedInOperatingActivitiesSummaryOfBusinessResults",
+    "jpcrp_cor:CashFlowsFromUsedInOperatingActivitiesIFRSSummaryOfBusinessResults",
+  ],
+  dividendPerShare: ["jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults"],
+  sharesIssued: ["jpcrp_cor:TotalNumberOfIssuedSharesSummaryOfBusinessResults"],
+};
+
+// 親会社単位でしか開示されない項目（単体コンテキストへのフォールバックを許可）
+const PARENT_ONLY_HISTORY_FIELDS = new Set(["dividendPerShare", "sharesIssued"]);
+
+const SHARES_ISSUED_TAGS = [
+  "jpcrp_cor:NumberOfIssuedSharesAsOfFilingDateIssuedSharesTotalNumberOfSharesEtc",
+  "jpcrp_cor:TotalNumberOfIssuedSharesSummaryOfBusinessResults",
+];
+const TREASURY_SHARES_TAGS = [
+  "jpcrp_cor:TotalNumberOfSharesHeldTreasurySharesEtc",
+  "jpcrp_cor:NumberOfSharesHeldInOwnNameTreasurySharesEtc",
+];
+
+const NON_CONSOLIDATED = "_NonConsolidatedMember";
+
+const PERIOD_CONTEXTS = {
+  annual: { duration: "CurrentYearDuration", instant: "CurrentYearInstant", priorDuration: "Prior1YearDuration" },
+  interim: { duration: "InterimDuration", instant: "InterimInstant", priorDuration: "Prior1InterimDuration" },
+  quarterly: { duration: "CurrentYTDDuration", instant: "CurrentQuarterInstant", priorDuration: "Prior1YTDDuration" },
+} as const;
+
+function toNumber(item: any): number | null {
+  const raw = item !== null && typeof item === "object" ? item["#text"] : item;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const num = typeof raw === "number" ? raw : parseFloat(String(raw).replace(/,/g, ""));
+  return isNaN(num) ? null : num;
+}
+
+function collectFacts(root: any, facts: Map<string, Fact[]>): void {
+  const tags = new Set<string>([
+    ...Object.keys(VALUE_EXTRACTORS),
+    ...Object.values(HISTORY_TAGS).flat(),
+    ...SHARES_ISSUED_TAGS,
+    ...TREASURY_SHARES_TAGS,
+  ]);
+  const push = (key: string, raw: any) => {
+    const items = Array.isArray(raw) ? raw : [raw];
+    for (const item of items) {
+      const ctx = item?.["@_contextRef"];
+      const value = toNumber(item);
+      if (!ctx || value === null) continue;
+      if (!facts.has(key)) facts.set(key, []);
+      facts.get(key)!.push({ ctx, value });
+    }
+  };
+  for (const tag of tags) {
+    if (root[tag] !== undefined) push(tag, root[tag]);
+  }
+  for (const key of Object.keys(root)) {
+    if (CUSTOM_REVENUE_RE.test(key)) push(CUSTOM_REVENUE_TAG, root[key]);
+  }
+}
+
+function collectContextEnds(root: any, contextEnds: Map<string, string>): void {
+  const raw = root["xbrli:context"];
+  if (!raw) return;
+  for (const c of Array.isArray(raw) ? raw : [raw]) {
+    const period = c?.["xbrli:period"];
+    const end = period?.["xbrli:endDate"] ?? period?.["xbrli:instant"];
+    if (c?.["@_id"] && end) contextEnds.set(c["@_id"], String(end));
+  }
+}
+
+/** 指定コンテキスト（完全一致、優先順）の値を取得 */
+function pick(facts: Map<string, Fact[]>, tag: string, ctxs: string[]): number | null {
+  const list = facts.get(tag);
+  if (!list) return null;
+  for (const ctx of ctxs) {
+    const hit = list.find((f) => f.ctx === ctx);
+    if (hit) return hit.value;
+  }
+  return null;
+}
+
+function detectPeriodType(facts: Map<string, Fact[]>): FinancialStatements["periodType"] {
+  const ctxs = new Set<string>();
+  for (const list of facts.values()) for (const f of list) ctxs.add(f.ctx);
+  if (ctxs.has("InterimDuration")) return "interim";
+  if (ctxs.has("CurrentYTDDuration")) return "quarterly";
+  return "annual";
+}
+
+/**
+ * 収集した事実をフィールドに割り当てる。
+ * 当期は連結の当期コンテキストのみ採用し、無ければ単体（_NonConsolidatedMember）で補完。
+ * Prior2〜4期やセグメント等のメンバー付きコンテキストは当期値に混入させない。
+ */
+function resolveFacts(fs: FinancialStatements, facts: Map<string, Fact[]>, contextEnds: Map<string, string>): void {
+  fs.periodType = detectPeriodType(facts);
+  const pc = PERIOD_CONTEXTS[fs.periodType];
+
+  const assign = (ctxs: string[], target: (path: string) => Record<string, number | null> | null, pathFilter?: string) => {
+    for (const [tag, extractors] of Object.entries(VALUE_EXTRACTORS)) {
+      const value = pick(facts, tag, ctxs);
+      if (value === null) continue;
+      for (const extractor of extractors) {
+        if (pathFilter && extractor.path !== pathFilter) continue;
+        const obj = target(extractor.path);
+        const field = extractor.field as string;
+        if (obj && field in obj && obj[field] === null) obj[field] = value;
+      }
+    }
+  };
+
+  // 連結決算会社は単体値を混ぜない（配当は親会社単位なので例外）
+  const consolidated = fs.accountingInfo.consolidation === "連結";
+  const current = (path: string) => (fs as any)[path] as Record<string, number | null>;
+  const currentCtxs = [pc.duration, pc.instant];
+  assign(currentCtxs, current);
+  assign(currentCtxs.map((c) => c + NON_CONSOLIDATED), current, consolidated ? "dividend" : undefined);
+
+  // 前年同期（成長率用）
+  const prior = () => fs.priorPeriod as Record<string, number | null>;
+  assign([pc.priorDuration], prior, "incomeStatement");
+  if (!consolidated) assign([pc.priorDuration + NON_CONSOLIDATED], prior, "incomeStatement");
+
+  // 前期通期（半期・四半期のTTM用）
+  if (fs.periodType !== "annual") {
+    const fy = () => fs.priorFullYear as Record<string, number | null>;
+    assign(["Prior1YearDuration"], fy, "incomeStatement");
+    if (!consolidated) assign(["Prior1YearDuration" + NON_CONSOLIDATED], fy, "incomeStatement");
+    // 半期・四半期のPLには前期通期が無いため、主要な経営指標等の推移から補完
+    for (const field of ["revenue", "netIncome", "eps"] as const) {
+      for (const tag of HISTORY_TAGS[field]) {
+        fs.priorFullYear[field] ??= pick(facts, tag, ["Prior1YearDuration"]);
+      }
+    }
+  }
+
+  // 株式数
+  const shareCtxs = ["FilingDateInstant", pc.instant, pc.instant + NON_CONSOLIDATED];
+  for (const tag of SHARES_ISSUED_TAGS) {
+    fs.shares.issued ??= pick(facts, tag, shareCtxs);
+  }
+  for (const tag of TREASURY_SHARES_TAGS) {
+    fs.shares.treasury ??= pick(facts, tag, [pc.instant, "FilingDateInstant", pc.instant + NON_CONSOLIDATED]);
+  }
+
+  // 5期推移（有報のみ）
+  if (fs.periodType === "annual") {
+    const history: HistoryEntry[] = [];
+    for (let n = 4; n >= 0; n--) {
+      const dur = n === 0 ? "CurrentYearDuration" : `Prior${n}YearDuration`;
+      const inst = n === 0 ? "CurrentYearInstant" : `Prior${n}YearInstant`;
+      const entry: HistoryEntry = {
+        periodEnd: contextEnds.get(dur) ?? contextEnds.get(inst) ?? null,
+        revenue: null, ordinaryIncome: null, netIncome: null, eps: null, bps: null, roe: null,
+        totalAssets: null, netAssets: null, operatingCF: null, dividendPerShare: null, sharesIssued: null,
+      };
+      for (const [field, tags] of Object.entries(HISTORY_TAGS) as [keyof typeof HISTORY_TAGS, string[]][]) {
+        const ctxs = PARENT_ONLY_HISTORY_FIELDS.has(field)
+          ? [dur, inst, dur + NON_CONSOLIDATED, inst + NON_CONSOLIDATED]
+          : [dur, inst];
+        for (const tag of tags) {
+          const v = pick(facts, tag, ctxs);
+          if (v !== null) { entry[field] = v; break; }
+        }
+      }
+      // ROEは比率（0.392）で開示されるため%に変換
+      if (entry.roe !== null) entry.roe = Math.round(entry.roe * 10000) / 100;
+      const hasData = Object.entries(entry).some(([k, v]) => k !== "periodEnd" && v !== null);
+      if (hasData) history.push(entry);
+    }
+    fs.history = history;
+
+    // 本表が会社独自タグで取れなかった場合は推移表の当期値で補完
+    const latest = history[history.length - 1];
+    if (latest && latest.periodEnd === (contextEnds.get("CurrentYearDuration") ?? latest.periodEnd)) {
+      fs.incomeStatement.revenue ??= latest.revenue;
+      fs.incomeStatement.netIncome ??= latest.netIncome;
+      fs.incomeStatement.eps ??= latest.eps;
+      fs.balanceSheet.totalAssets ??= latest.totalAssets;
+      fs.valuation.bps ??= latest.bps;
+    }
+  }
 }
 
 /**
@@ -509,12 +784,16 @@ export function formatFinancialOutput(fs: FinancialStatements): object {
       healthScore: healthScore.score,
       healthGrade: healthScore.grade,
       overallSignal,
+      per: fs.valuation.per ? `${fs.valuation.per.toFixed(1)}倍` : null,
+      pbr: fs.valuation.pbr ? `${fs.valuation.pbr.toFixed(2)}倍` : null,
+      revenueGrowth: fs.growth.revenueGrowth !== null ? `${fs.growth.revenueGrowth > 0 ? "+" : ""}${fs.growth.revenueGrowth.toFixed(1)}%` : null,
+      epsGrowth: fs.growth.epsGrowth !== null ? `${fs.growth.epsGrowth > 0 ? "+" : ""}${fs.growth.epsGrowth.toFixed(1)}%` : null,
       keyHighlights: fs.summary.highlights.slice(0, 3),
       concerns: fs.summary.risks.slice(0, 3),
-      actionHint: overallSignal === "POSITIVE" 
-        ? "詳細分析の価値あり" 
-        : overallSignal === "NEGATIVE" 
-          ? "慎重な追加調査が必要" 
+      actionHint: overallSignal === "POSITIVE"
+        ? "詳細分析の価値あり"
+        : overallSignal === "NEGATIVE"
+          ? "慎重な追加調査が必要"
           : "リスク要因の詳細確認を推奨",
     },
 
@@ -593,8 +872,28 @@ export function formatFinancialOutput(fs: FinancialStatements): object {
       currentRatio: fs.metrics.currentRatio,
     },
     
+    // ======== バリュエーション（EDINET報告値） ========
+    valuation: {
+      per: fs.valuation.per ? `${fs.valuation.per.toFixed(1)}倍` : null,
+      pbr: fs.valuation.pbr ? `${fs.valuation.pbr.toFixed(2)}倍` : null,
+      bps: fs.valuation.bps ? `¥${fs.valuation.bps.toFixed(1)}` : null,
+      marketCap: toOku(fs.valuation.marketCap),
+      epsBasis: fs.periodType === "annual" ? "通期実績EPS" : "TTM EPS（前期通期 − 前年同期累計 + 当期累計）",
+      ttmEps: fs.trailing.eps,
+      sharesOutstanding: fs.shares.outstanding,
+      note: "PER/PBR/時価総額はJ-Quants株価で再計算（取得できない場合は有報記載値）",
+    },
+
+    // ======== 成長率（前期比） ========
+    growth: {
+      revenueGrowth: fs.growth.revenueGrowth !== null ? `${fs.growth.revenueGrowth > 0 ? "+" : ""}${fs.growth.revenueGrowth.toFixed(1)}%` : null,
+      operatingIncomeGrowth: fs.growth.operatingIncomeGrowth !== null ? `${fs.growth.operatingIncomeGrowth > 0 ? "+" : ""}${fs.growth.operatingIncomeGrowth.toFixed(1)}%` : null,
+      netIncomeGrowth: fs.growth.netIncomeGrowth !== null ? `${fs.growth.netIncomeGrowth > 0 ? "+" : ""}${fs.growth.netIncomeGrowth.toFixed(1)}%` : null,
+      epsGrowth: fs.growth.epsGrowth !== null ? `${fs.growth.epsGrowth > 0 ? "+" : ""}${fs.growth.epsGrowth.toFixed(1)}%` : null,
+    },
+
     aiSummary: fs.summary,
-    
+
     dividend: {
       annualDividendPerShare: fs.dividend.annualDividendPerShare ? `¥${fs.dividend.annualDividendPerShare}` : null,
       interimDividendPerShare: fs.dividend.interimDividendPerShare ? `¥${fs.dividend.interimDividendPerShare}` : null,
