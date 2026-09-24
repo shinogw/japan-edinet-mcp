@@ -158,8 +158,10 @@ export class EdinetClient {
       const dateStr = d.toISOString().split("T")[0];
       try {
         const response = await this.getDocumentList({ date: dateStr, type: "2" });
+        // 4桁/5桁どちらも正規化して比較（例: "8830" ↔ "88300"）
+        const to4 = (c: string) => (c.length === 5 && c.endsWith("0")) ? c.slice(0, 4) : c;
         const filtered = response.results.filter(
-          (doc) => doc.secCode === secCode || doc.secCode === secCode + "0"
+          (doc) => to4(doc.secCode ?? "") === to4(secCode)
         );
         results.push(...filtered);
       } catch (error) {

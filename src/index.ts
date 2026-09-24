@@ -579,16 +579,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             if (keyword) {
               filtered = filtered.filter(
-                (doc) => 
-                  doc.filerName.includes(keyword) ||
-                  doc.docDescription.includes(keyword)
+                (doc) =>
+                  (doc.filerName && doc.filerName.includes(keyword)) ||
+                  (doc.docDescription && doc.docDescription.includes(keyword))
               );
             }
 
             if (docType) {
               filtered = filtered.filter(
-                (doc) => 
-                  doc.docDescription.includes(docType) ||
+                (doc) =>
+                  (doc.docDescription && doc.docDescription.includes(docType)) ||
                   (DOC_TYPE_MAP[doc.docTypeCode] && DOC_TYPE_MAP[doc.docTypeCode].includes(docType))
               );
             }
@@ -627,8 +627,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const searchPeriods = [30, 90, 180, 365];
         
         for (const days of searchPeriods) {
-          if (documents.length > 0) break;
-          
           const endDate = new Date().toISOString().split("T")[0];
           const startDate = (() => {
             const d = new Date();
@@ -639,6 +637,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (secCode) {
             documents = await client.searchBySecCode(secCode, startDate, endDate);
           } else if (companyName) {
+            documents = [];
             const d = new Date(endDate);
             for (let i = 0; i < days && documents.length < 10; i++) {
               const dateStr = d.toISOString().split("T")[0];
@@ -654,18 +653,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               d.setDate(d.getDate() - 1);
             }
           }
-          
-          // Filter for financial reports early to stop search if found
+
+          // Stop expanding only when financial reports are found
           const reportDocs = documents.filter(
-            (doc) => 
+            (doc) =>
               doc.docTypeCode === "120" || // 有価証券報告書
               doc.docTypeCode === "140" || // 四半期報告書
               doc.docTypeCode === "160"    // 半期報告書
           );
-          if (reportDocs.length > 0) {
-            documents = documents; // Found reports, exit loop
-            break;
-          }
+          if (reportDocs.length > 0) break;
         }
 
         // Filter for annual or quarterly reports
@@ -892,8 +888,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const searchPeriods = [30, 90, 180, 365];
         
         for (const days of searchPeriods) {
-          if (documents.length > 0) break;
-          
           const endDate = new Date().toISOString().split("T")[0];
           const startDate = (() => {
             const d = new Date();
@@ -904,6 +898,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (secCode) {
             documents = await client.searchBySecCode(secCode, startDate, endDate);
           } else if (companyName) {
+            documents = [];
             const d = new Date(endDate);
             for (let i = 0; i < Math.min(days, 60) && documents.length < 10; i++) {
               const dateStr = d.toISOString().split("T")[0];
@@ -919,7 +914,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               d.setDate(d.getDate() - 1);
             }
           }
-          
+
           const reportDocs = documents.filter(
             (doc) => doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160"
           );
@@ -946,7 +941,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const latestDoc = reportDocs[0];
-        
+
         // XBRLを解析して投資判断を生成
         try {
           if (latestDoc.xbrlFlag === "1") {
@@ -1030,7 +1025,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const searchPeriods = [30, 90, 180, 365];
         
         for (const days of searchPeriods) {
-          if (documents.length > 0) break;
           const endDate = new Date().toISOString().split("T")[0];
           const startDate = (() => {
             const d = new Date();
@@ -1777,38 +1771,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // Find the company's latest filing
-        const endDate = new Date().toISOString().split("T")[0];
-        const startDate = (() => {
-          const d = new Date();
-          d.setDate(d.getDate() - 180); // Last 180 days for annual reports
-          return d.toISOString().split("T")[0];
-        })();
-
+        // Find the company's latest filing (progressive search: 30 -> 90 -> 180 -> 365 days)
         let documents: Document[] = [];
-        
-        if (secCode) {
-          documents = await client.searchBySecCode(secCode, startDate, endDate);
-        } else if (companyName) {
-          const d = new Date(endDate);
-          for (let i = 0; i < 60 && documents.length < 10; i++) {
-            const dateStr = d.toISOString().split("T")[0];
-            try {
-              const response = await client.getDocumentList({ date: dateStr, type: "2" });
-              const filtered = response.results.filter(
-                (doc) => doc.filerName.includes(companyName!)
-              );
-              documents.push(...filtered);
-            } catch (error) {
-              // Skip errors
+        const searchPeriods = [30, 90, 180, 365];
+
+        for (const days of searchPeriods) {
+          const endDate = new Date().toISOString().split("T")[0];
+          const startDate = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() - days);
+            return d.toISOString().split("T")[0];
+          })();
+
+          if (secCode) {
+            documents = await client.searchBySecCode(secCode, startDate, endDate);
+          } else if (companyName) {
+            documents = [];
+            const d = new Date(endDate);
+            for (let i = 0; i < Math.min(days, 60) && documents.length < 10; i++) {
+              const dateStr = d.toISOString().split("T")[0];
+              try {
+                const response = await client.getDocumentList({ date: dateStr, type: "2" });
+                const filtered = response.results.filter(
+                  (doc) => doc.filerName && doc.filerName.includes(companyName!)
+                );
+                documents.push(...filtered);
+              } catch (error) {
+                // Skip errors
+              }
+              d.setDate(d.getDate() - 1);
             }
-            d.setDate(d.getDate() - 1);
           }
+
+          const found = documents.filter(
+            (doc) => (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") && doc.xbrlFlag === "1"
+          );
+          if (found.length > 0) break;
         }
 
         // Filter for annual or quarterly reports with XBRL
         const reportDocs = documents.filter(
-          (doc) => 
+          (doc) =>
             (doc.docTypeCode === "120" || doc.docTypeCode === "140" || doc.docTypeCode === "160") &&
             doc.xbrlFlag === "1"
         );
